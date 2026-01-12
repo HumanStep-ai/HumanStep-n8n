@@ -1,0 +1,64 @@
+{
+  "name": "n8n-nodes-humanstep",
+  "version": "0.1.0",
+  "description": "n8n community node for HumanStep — add human decision steps to your automation workflows",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "humanstep",
+    "human-in-the-loop",
+    "approval"
+  ],
+  "license": "MIT",
+  "homepage": "https://humanstep.ai",
+  "author": {
+    "name": "HumanStep",
+    "email": "contact@humanstep.ai"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HumanStep-ai/HumanStep-n8n.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HumanStep-ai/HumanStep-n8n/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && gulp build:icons",
+    "dev": "tsc --watch",
+    "lint": "eslint nodes credentials package.json --ext .ts",
+    "lintfix": "eslint nodes credentials package.json --ext .ts --fix",
+    "prepublishOnly": "npm run build && npm run lint"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "nodes": [
+      "dist/nodes/HumanStep/HumanStep.node.js",
+      "dist/nodes/HumanStep/HumanStepTrigger.node.js"
+    ],
+    "credentials": [
+      "dist/credentials/HumanStepApi.credentials.js"
+    ]
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^18.11.9",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-n8n-nodes-base": "^1.16.3",
+    "gulp": "^4.0.2",
+    "jsonc-eslint-parser": "^2.4.0",
+    "n8n-workflow": "^1.82.0",
+    "typescript": "~5.3.0"
+  }
+}
