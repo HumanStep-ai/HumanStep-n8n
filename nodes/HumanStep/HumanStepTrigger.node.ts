@@ -76,14 +76,6 @@ export class HumanStepTrigger implements INodeType {
 				description: 'Whether to filter by a specific template',
 			},
 			{
-				displayName: 'Wait for Real Data',
-				name: 'waitForRealData',
-				type: 'boolean',
-				default: false,
-				description:
-					'Whether to wait for a real HumanStep webhook instead of receiving an immediate sample payload',
-			},
-			{
 				displayName: 'Templates',
 				name: 'templateId',
 				type: 'resourceLocator',
@@ -157,6 +149,14 @@ export class HumanStepTrigger implements INodeType {
 					},
 				],
 				description: 'Only trigger for decisions in this category',
+			},
+			{
+				displayName: 'Wait for Real Data',
+				name: 'waitForRealData',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to wait for a real HumanStep webhook instead of receiving an immediate sample payload',
 			},
 		],
 	};
