@@ -97,15 +97,21 @@ Publishing uses GitHub Actions with [npm provenance](https://docs.npmjs.com/gene
 ### One-time setup
 
 1. Create the public GitHub repository: `HumanStep-ai/HumanStep-n8n`
-2. Register the npm package name `n8n-nodes-humanstep`
-3. Configure [npm Trusted Publishers](https://docs.npmjs.com/trusted-publishers) linked to this GitHub repo and the `publish.yml` workflow
+2. Register the npm package name `n8n-nodes-humanstep` under the `humanstepai` npm account
+3. Add a GitHub Actions secret **`NPM_TOKEN`** (recommended):
+   - npm → Access Tokens → **Granular Access Token**
+   - Permissions: read/write on `n8n-nodes-humanstep` only
+   - GitHub repo → Settings → Secrets → Actions → New secret → `NPM_TOKEN`
+4. Optional: configure [npm Trusted Publishers](https://docs.npmjs.com/trusted-publishers) for OIDC-only publishes (no token). Requires package settings → Trusted publishing → GitHub Actions → `HumanStep-ai` / `HumanStep-n8n` / `publish.yml` exactly.
+
+If CI fails with `404 Not Found` on `npm publish`, Trusted Publisher is not linked yet — use `NPM_TOKEN` instead.
 
 ### Release flow
 
-1. Merge changes to `main`
-2. Create a GitHub Release with tag `v0.1.0` (semver, with `v` prefix)
-3. The **Publish** workflow runs lint, build, and `npm publish --provenance --access public`
-4. Install in n8n via **Settings → Community Nodes → `n8n-nodes-humanstep`**
+1. Bump `version` in `package.json` and push to `main`
+2. Tag and push: `git tag v0.1.2 && git push origin v0.1.2` (or create a GitHub Release)
+3. The **Publish** workflow runs lint, build, and `npm publish`
+4. In n8n: **Settings → Community Nodes → update** `n8n-nodes-humanstep`
 
 ### Verification (optional, later)
 
