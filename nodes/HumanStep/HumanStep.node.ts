@@ -9,7 +9,7 @@ import {
 	ResourceMapperFields,
 	FieldType,
 } from 'n8n-workflow';
-import { humanStepApiRequest } from './GenericFunctions';
+import { humanStepApiRequest, listActiveTemplates } from './GenericFunctions';
 
 // Map HumanStep field types to n8n field types
 function mapFieldType(hsType: string): FieldType {
@@ -49,15 +49,15 @@ function mapFieldType(hsType: string): FieldType {
 
 export class HumanStep implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'Human Step',
+		displayName: 'HumanStep',
 		name: 'humanStep',
 		icon: 'file:humanstep.svg',
 		group: ['transform'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
-		description: 'Interact with Human Step API',
+		description: 'Interact with the HumanStep API',
 		defaults: {
-			name: 'Human Step',
+			name: 'HumanStep',
 		},
 		inputs: ['main'],
 		outputs: ['main'],
@@ -128,7 +128,7 @@ export class HumanStep implements INodeType {
 				},
 				default: '',
 				placeholder: 'e.g. Approve this request?',
-				description: 'The question that will be displayed in Human Step for validation (boolean response)',
+				description: 'The question shown in HumanStep for this validation (boolean response)',
 			},
 			{
 				displayName: 'Options',
@@ -259,23 +259,7 @@ export class HumanStep implements INodeType {
 	methods = {
 		listSearch: {
 			async getTemplates(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult> {
-				const response = await humanStepApiRequest.call(this, 'GET', '/templates');
-				const templates = (Array.isArray(response.templates) ? response.templates : []) as Array<{
-					name: string;
-					id: string;
-				}>;
-
-				let results = templates.map((template: { name: string; id: string }) => ({
-					name: template.name,
-					value: template.id,
-				}));
-
-				// Filter results if search query provided
-				if (filter) {
-					const filterLower = filter.toLowerCase();
-					results = results.filter((t: any) => t.name.toLowerCase().includes(filterLower));
-				}
-
+				const results = await listActiveTemplates.call(this, filter);
 				return { results };
 			},
 		},

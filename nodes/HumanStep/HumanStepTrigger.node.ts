@@ -7,19 +7,26 @@ import {
 	ILoadOptionsFunctions,
 	INodeListSearchResult,
 } from 'n8n-workflow';
-import { getWebhookId, humanStepApiRequest } from './GenericFunctions';
+import {
+	extractTemplateId,
+	getWebhookId,
+	humanStepApiRequest,
+	listActiveTemplates,
+	triggerTestWebhook,
+} from './GenericFunctions';
+import type { JsonObject } from 'n8n-workflow';
 
 export class HumanStepTrigger implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'Human Step Trigger',
+		displayName: 'HumanStep Trigger',
 		name: 'humanStepTrigger',
 		icon: 'file:humanstep.svg',
 		group: ['trigger'],
 		version: 1,
 		subtitle: '={{$parameter["event"]}}',
-		description: 'Triggers when a decision is resolved in Human Step',
+		description: 'Triggers when a decision is resolved in HumanStep',
 		defaults: {
-			name: 'Human Step Trigger',
+			name: 'HumanStep Trigger',
 		},
 		inputs: [],
 		outputs: ['main'],
@@ -38,6 +45,13 @@ export class HumanStepTrigger implements INodeType {
 			},
 		],
 		properties: [
+			{
+				displayName:
+					'Webhook trigger: click **Execute step** to register a listener and receive a test payload. Activate the workflow for live events. n8n must be reachable from the internet (use n8n Cloud or a tunnel for local instances).',
+				name: 'triggerNotice',
+				type: 'notice',
+				default: '',
+			},
 			{
 				displayName: 'Event',
 				name: 'event',
@@ -96,23 +110,7 @@ export class HumanStepTrigger implements INodeType {
 	methods = {
 		listSearch: {
 			async getTemplates(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult> {
-				const response = await humanStepApiRequest.call(this, 'GET', '/templates');
-				const templates = (Array.isArray(response.templates) ? response.templates : []) as Array<{
-					name: string;
-					id: string;
-				}>;
-
-				let results = templates.map((template: { name: string; id: string }) => ({
-					name: template.name,
-					value: template.id,
-				}));
-
-				// Filter results if search query provided
-				if (filter) {
-					const filterLower = filter.toLowerCase();
-					results = results.filter((t: any) => t.name.toLowerCase().includes(filterLower));
-				}
-
+				const results = await listActiveTemplates.call(this, filter);
 				return { results };
 			},
 		},
@@ -144,21 +142,19 @@ export class HumanStepTrigger implements INodeType {
 				const webhookData = this.getWorkflowStaticData('node');
 				const event = this.getNodeParameter('event') as string;
 				const useTemplate = this.getNodeParameter('useTemplate') as boolean;
+				const templateId = useTemplate
+					? extractTemplateId(this.getNodeParameter('templateId'))
+					: undefined;
 
-				const body: any = {
+				const body: JsonObject = {
 					name: `n8n-trigger-${this.getWorkflow().id}`,
 					url: webhookUrl,
 					events: [event],
 					is_active: true,
 				};
 
-				// Include template_id if using template filter
-				if (useTemplate) {
-					const templateIdParam = this.getNodeParameter('templateId') as any;
-					const templateId = templateIdParam?.value;
-					if (templateId) {
-						body.template_id = templateId;
-					}
+				if (templateId) {
+					body.template_id = templateId;
 				}
 
 				const responseData = await humanStepApiRequest.call(
@@ -174,6 +170,13 @@ export class HumanStepTrigger implements INodeType {
 				}
 
 				webhookData.webhookId = webhookId;
+
+				try {
+					await triggerTestWebhook.call(this, webhookId, templateId);
+				} catch {
+					// Test delivery is best-effort; live events still work once n8n is reachable.
+				}
+
 				return true;
 			},
 			async delete(this: IHookFunctions): Promise<boolean> {
@@ -202,17 +205,12 @@ export class HumanStepTrigger implements INodeType {
 		const bodyData = this.getBodyData();
 		const useTemplate = this.getNodeParameter('useTemplate') as boolean;
 
-		// If template filter is enabled, check if the decision matches
 		if (useTemplate) {
-			const templateIdParam = this.getNodeParameter('templateId') as any;
-			const templateId = templateIdParam?.value;
-			
-			// Check if the webhook payload contains the decision data
-			const decision = (bodyData as any).decision || bodyData;
-			
-			// Filter by template if specified
-			if (templateId && (decision as any).template_id !== templateId) {
-				// Return empty response - this decision doesn't match our filter
+			const templateId = extractTemplateId(this.getNodeParameter('templateId'));
+			const decision = (bodyData as Record<string, unknown>).decision ?? bodyData;
+			const decisionTemplateId = (decision as Record<string, unknown>).template_id;
+
+			if (templateId && decisionTemplateId !== templateId) {
 				return {
 					workflowData: [],
 				};
