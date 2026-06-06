@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 18+ locally; CI and publish use Node 22 (required for npm Trusted Publishing)
 - A running n8n instance (local or cloud)
 - HumanStep API key with access to `https://api.humanstep.ai/api`
 
