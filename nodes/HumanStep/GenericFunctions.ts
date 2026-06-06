@@ -32,7 +32,7 @@ function formatApiError(error: unknown): string {
 	return `HumanStep API error: ${err.message ?? 'Unknown error'}`;
 }
 
-export function extractTemplateId(param: unknown): string | undefined {
+function extractResourceLocatorValue(param: unknown): string | undefined {
 	if (typeof param === 'string' && param.trim()) {
 		return param.trim();
 	}
@@ -43,6 +43,14 @@ export function extractTemplateId(param: unknown): string | undefined {
 		}
 	}
 	return undefined;
+}
+
+export function extractTemplateId(param: unknown): string | undefined {
+	return extractResourceLocatorValue(param);
+}
+
+export function extractCategoryId(param: unknown): string | undefined {
+	return extractResourceLocatorValue(param);
 }
 
 export function getAppBaseUrl(apiBaseUrl: string): string {
@@ -117,11 +125,19 @@ export async function triggerTestWebhook(
 	this: IHookFunctions,
 	webhookId: string,
 	templateId?: string,
+	categoryId?: string,
 ): Promise<void> {
 	const credentials = await this.getCredentials('humanStepApi');
 	const apiBase = normalizeBaseUrl((credentials.baseUrl as string) || DEFAULT_BASE_URL);
 	const appBase = getAppBaseUrl(apiBase);
-	const body: JsonObject = templateId ? { template_id: templateId } : {};
+	const body: JsonObject = {};
+
+	if (templateId) {
+		body.template_id = templateId;
+	}
+	if (categoryId) {
+		body.category_id = categoryId;
+	}
 
 	await humanStepApiRequest.call(
 		this,
@@ -151,6 +167,29 @@ export async function listActiveTemplates(
 	if (filter) {
 		const filterLower = filter.toLowerCase();
 		results = results.filter((t) => t.name.toLowerCase().includes(filterLower));
+	}
+
+	return results;
+}
+
+export async function listCategories(
+	this: ILoadOptionsFunctions,
+	filter?: string,
+): Promise<Array<{ name: string; value: string }>> {
+	const response = await humanStepApiRequest.call(this, 'GET', '/categories');
+	const categories = (Array.isArray(response.categories) ? response.categories : []) as Array<{
+		name: string;
+		id: string;
+	}>;
+
+	let results = categories.map((category) => ({
+		name: category.name,
+		value: category.id,
+	}));
+
+	if (filter) {
+		const filterLower = filter.toLowerCase();
+		results = results.filter((category) => category.name.toLowerCase().includes(filterLower));
 	}
 
 	return results;

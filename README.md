@@ -62,7 +62,10 @@ Creates a pending decision in HumanStep and returns the decision object (includi
 Listens for **Decision Resolved** events from HumanStep.
 
 - **Use Template** `false` — triggers for any resolved decision in your workspace
+- **Use Category** `true` — when **Use Template** is `false`, only triggers for decisions in the selected category
 - **Use Template** `true` — only triggers for decisions using the selected template
+- **Wait for Real Data** `false` — sends an immediate sample payload when you execute the trigger
+- **Wait for Real Data** `true` — waits for the next real HumanStep webhook event
 
 When you activate the workflow, the trigger registers a webhook with HumanStep. Resolved decisions are delivered to your n8n webhook URL.
 
@@ -91,6 +94,7 @@ When a decision is resolved, the trigger receives:
     "id": "uuid",
     "team_id": "uuid",
     "template_id": "uuid",
+    "category_id": "uuid",
     "title": "Decision title",
     "status": "approved",
     "reason_required": false,
