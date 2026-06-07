@@ -8,8 +8,12 @@ import {
 	INodePropertyOptions,
 	ResourceMapperFields,
 	FieldType,
+	JsonObject,
+	NodeOperationError,
 } from 'n8n-workflow';
-import { humanStepApiRequest, listActiveTemplates } from './GenericFunctions';
+import { extractTemplateId, humanStepApiRequest, listActiveTemplates, waitForDecision } from './GenericFunctions';
+
+const CREATE_DECISION_OPERATIONS = ['createDecision', 'createDecisionAndWait'];
 
 // Map HumanStep field types to n8n field types
 function mapFieldType(hsType: string): FieldType {
@@ -45,6 +49,89 @@ function mapFieldType(hsType: string): FieldType {
 		default:
 			return 'string';
 	}
+}
+
+function parsePayloadJson(value: unknown): JsonObject {
+	if (value === undefined || value === null || value === '') {
+		return {};
+	}
+	if (typeof value === 'string') {
+		return JSON.parse(value) as JsonObject;
+	}
+	if (typeof value === 'object' && !Array.isArray(value)) {
+		return value as JsonObject;
+	}
+	return {};
+}
+
+function getResponseDecisionId(response: JsonObject): string | undefined {
+	const decision = (response.decision ?? response) as Record<string, unknown>;
+	return typeof decision.id === 'string' ? decision.id : undefined;
+}
+
+function buildDecisionRequestBody(
+	executeFunctions: IExecuteFunctions,
+	itemIndex: number,
+): JsonObject {
+	const useTemplate = executeFunctions.getNodeParameter('useTemplate', itemIndex) as boolean;
+
+	if (useTemplate) {
+		const templateId = extractTemplateId(executeFunctions.getNodeParameter('templateId', itemIndex));
+		if (!templateId) {
+			throw new NodeOperationError(
+				executeFunctions.getNode(),
+				'A HumanStep review template is required',
+				{ itemIndex },
+			);
+		}
+		const fieldsData = executeFunctions.getNodeParameter('fields', itemIndex, {}) as {
+			value?: Record<string, unknown>;
+		};
+		const additionalOptions = executeFunctions.getNodeParameter(
+			'additionalOptions',
+			itemIndex,
+			{},
+		) as Record<string, unknown>;
+		const payload: JsonObject = {};
+
+		if (fieldsData.value && typeof fieldsData.value === 'object') {
+			for (const [key, value] of Object.entries(fieldsData.value)) {
+				if (value !== undefined && value !== null && value !== '') {
+					payload[key] = value as JsonObject[string];
+				}
+			}
+		}
+		if (additionalOptions.priority) {
+			payload.priority = additionalOptions.priority as string;
+		}
+		if (additionalOptions.externalId) {
+			payload.external_id = additionalOptions.externalId as string;
+		}
+
+		const requestBody: JsonObject = {
+			template_id: templateId,
+			payload,
+		};
+
+		if (additionalOptions.callbackUrl) {
+			requestBody.callback_url = additionalOptions.callbackUrl as string;
+		}
+
+		return requestBody;
+	}
+
+	const questionTitle = executeFunctions.getNodeParameter('questionTitle', itemIndex) as string;
+	const options = executeFunctions.getNodeParameter('options', itemIndex, {}) as Record<string, unknown>;
+	const requestBody: JsonObject = {
+		title: questionTitle,
+		payload: parsePayloadJson(options.payloadJson),
+	};
+
+	if (options.callbackUrl) {
+		requestBody.callback_url = options.callbackUrl as string;
+	}
+
+	return requestBody;
 }
 
 export class HumanStep implements INodeType {
@@ -95,8 +182,14 @@ export class HumanStep implements INodeType {
 					{
 						name: 'Create Decision',
 						value: 'createDecision',
-						description: 'Create a decision request for human review in HumanStep',
+						description: 'Create a decision request and continue immediately',
 						action: 'Create a decision',
+					},
+					{
+						name: 'Create Decision and Wait',
+						value: 'createDecisionAndWait',
+						description: 'Create a decision request and wait until it is resolved',
+						action: 'Create a decision and wait',
 					},
 				],
 				default: 'createDecision',
@@ -109,7 +202,7 @@ export class HumanStep implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['validation'],
-						operation: ['createDecision'],
+						operation: CREATE_DECISION_OPERATIONS,
 					},
 				},
 				description: 'Whether to use a predefined template for this validation',
@@ -122,7 +215,7 @@ export class HumanStep implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['validation'],
-						operation: ['createDecision'],
+						operation: CREATE_DECISION_OPERATIONS,
 						useTemplate: [false],
 					},
 				},
@@ -139,7 +232,7 @@ export class HumanStep implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['validation'],
-						operation: ['createDecision'],
+						operation: CREATE_DECISION_OPERATIONS,
 						useTemplate: [false],
 					},
 				},
@@ -150,6 +243,14 @@ export class HumanStep implements INodeType {
 						type: 'json',
 						default: '{}',
 						description: 'JSON payload to include with the validation request',
+					},
+					{
+						displayName: 'Callback URL',
+						name: 'callbackUrl',
+						type: 'string',
+						default: '',
+						description:
+							'Optional URL HumanStep should call when this decision is resolved. Use the trigger node for managed n8n webhooks.',
 					},
 				],
 			},
@@ -162,7 +263,7 @@ export class HumanStep implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['validation'],
-						operation: ['createDecision'],
+						operation: CREATE_DECISION_OPERATIONS,
 						useTemplate: [true],
 					},
 				},
@@ -197,7 +298,7 @@ export class HumanStep implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['validation'],
-						operation: ['createDecision'],
+						operation: CREATE_DECISION_OPERATIONS,
 						useTemplate: [true],
 					},
 				},
@@ -226,7 +327,7 @@ export class HumanStep implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['validation'],
-						operation: ['createDecision'],
+						operation: CREATE_DECISION_OPERATIONS,
 						useTemplate: [true],
 					},
 				},
@@ -250,6 +351,49 @@ export class HumanStep implements INodeType {
 						type: 'string',
 						default: '',
 						description: 'Your own reference ID to track this request',
+					},
+					{
+						displayName: 'Callback URL',
+						name: 'callbackUrl',
+						type: 'string',
+						default: '',
+						description:
+							'Optional URL HumanStep should call when this decision is resolved. Use the trigger node for managed n8n webhooks.',
+					},
+				],
+			},
+			{
+				displayName: 'Wait Options',
+				name: 'waitOptions',
+				type: 'collection',
+				placeholder: 'Add Wait Option',
+				default: {},
+				displayOptions: {
+					show: {
+						resource: ['validation'],
+						operation: ['createDecisionAndWait'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Poll Interval (Seconds)',
+						name: 'pollIntervalSeconds',
+						type: 'number',
+						default: 2,
+						typeOptions: {
+							minValue: 0.5,
+						},
+						description: 'How often to check HumanStep for the resolved decision',
+					},
+					{
+						displayName: 'Timeout (Minutes)',
+						name: 'timeoutMinutes',
+						type: 'number',
+						default: 5,
+						typeOptions: {
+							minValue: 1,
+						},
+						description: 'Maximum time to wait before failing the node',
 					},
 				],
 			},
@@ -305,7 +449,7 @@ export class HumanStep implements INodeType {
 
 						return {
 							name: label,
-							value: field.id || field.key,
+							value: field.key || field.id,
 							description: field.description || field.helpText || undefined,
 						};
 					});
@@ -340,7 +484,7 @@ export class HumanStep implements INodeType {
 					}
 
 					const fields = schemaFields.map((field: any) => {
-						const fieldId = field.id || field.key;
+						const fieldId = field.key || field.id;
 						const displayName = field.label || field.key || field.id;
 						const fieldType = field.type || 'text';
 						const n8nType = mapFieldType(fieldType);
@@ -382,69 +526,29 @@ export class HumanStep implements INodeType {
 		for (let i = 0; i < items.length; i++) {
 			try {
 				if (resource === 'validation') {
-					if (operation === 'createDecision') {
-						const useTemplate = this.getNodeParameter('useTemplate', i) as boolean;
-						let requestBody: any = {};
+					if (CREATE_DECISION_OPERATIONS.includes(operation)) {
+						const requestBody = buildDecisionRequestBody(this, i);
+						const responseData = await humanStepApiRequest.call(this, 'POST', '/decisions', requestBody);
+						let outputData = responseData;
 
-						if (useTemplate) {
-							// Using a template
-							const templateIdParam = this.getNodeParameter('templateId', i) as any;
-							const templateId = templateIdParam?.value;
-
-							// Get payload from resource mapper fields
-							const fieldsData = this.getNodeParameter('fields', i, {}) as any;
-							const payload: { [key: string]: any } = {};
-							
-							// resourceMapper returns { mappingMode: string, value: { ... } }
-							if (fieldsData.value && typeof fieldsData.value === 'object') {
-								for (const [key, value] of Object.entries(fieldsData.value)) {
-									if (value !== undefined && value !== null && value !== '') {
-										payload[key] = value;
-									}
-								}
+						if (operation === 'createDecisionAndWait') {
+							const decisionId = getResponseDecisionId(responseData);
+							if (!decisionId) {
+								throw new NodeOperationError(
+									this.getNode(),
+									'HumanStep API response did not include a decision id to wait for',
+									{ itemIndex: i },
+								);
 							}
-
-							// Get additional options
-							const additionalOptions = this.getNodeParameter('additionalOptions', i, {}) as any;
-
-							requestBody = {
-								template_id: templateId,
-								payload,
-							};
-
-							// Add optional fields
-							if (additionalOptions.priority) {
-								requestBody.priority = additionalOptions.priority;
-							}
-							if (additionalOptions.externalId) {
-								requestBody.external_id = additionalOptions.externalId;
-							}
-						} else {
-							// Simple boolean validation without template
-							const questionTitle = this.getNodeParameter('questionTitle', i) as string;
-							const options = this.getNodeParameter('options', i) as any;
-							
-							let payload = {};
-							if (options.payloadJson) {
-								try {
-									payload = typeof options.payloadJson === 'string' 
-										? JSON.parse(options.payloadJson) 
-										: options.payloadJson;
-								} catch (e) {
-									// Keep empty object if JSON parsing fails
-								}
-							}
-
-							requestBody = {
-								title: questionTitle,
-								payload,
-							};
+							const waitOptions = this.getNodeParameter('waitOptions', i, {}) as Record<string, number>;
+							outputData = await waitForDecision.call(this, decisionId, {
+								pollMs: (waitOptions.pollIntervalSeconds ?? 2) * 1000,
+								timeoutMs: (waitOptions.timeoutMinutes ?? 5) * 60 * 1000,
+							});
 						}
 
-						const responseData = await humanStepApiRequest.call(this, 'POST', '/decisions', requestBody);
-
 						returnData.push({
-							json: responseData,
+							json: outputData,
 							pairedItem: { item: i },
 						});
 					}

@@ -7,6 +7,8 @@ import {
 } from 'n8n-workflow';
 
 const DEFAULT_BASE_URL = 'https://api.humanstep.ai/api';
+const DEFAULT_WAIT_POLL_MS = 2000;
+const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 
 function normalizeBaseUrl(baseUrl: string): string {
 	return baseUrl.replace(/\/+$/, '');
@@ -112,6 +114,38 @@ export async function humanStepApiRequest(
 		return (await this.helpers.request!(options)) as JsonObject;
 	} catch (error) {
 		throw new Error(formatApiError(error));
+	}
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function getDecision(
+	this: IExecuteFunctions,
+	decisionId: string,
+): Promise<JsonObject> {
+	return humanStepApiRequest.call(this, 'GET', `/decisions/${encodeURIComponent(decisionId)}`);
+}
+
+export async function waitForDecision(
+	this: IExecuteFunctions,
+	decisionId: string,
+	options: { pollMs?: number; timeoutMs?: number } = {},
+): Promise<JsonObject> {
+	const pollMs = Math.max(500, options.pollMs ?? DEFAULT_WAIT_POLL_MS);
+	const timeoutMs = Math.max(1000, options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS);
+	const deadline = Date.now() + timeoutMs;
+
+	while (true) {
+		const decision = await getDecision.call(this, decisionId);
+		if (decision.status !== 'pending') {
+			return decision;
+		}
+		if (Date.now() >= deadline) {
+			throw new Error(`Timeout waiting for decision ${decisionId} after ${timeoutMs}ms`);
+		}
+		await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
 	}
 }
 

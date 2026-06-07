@@ -4,7 +4,7 @@
 
 HumanStep lets you pause automations and route decisions to people for review. This integration provides:
 
-- **HumanStep** action node — create decision requests (simple approval or template-based)
+- **HumanStep** action node — create decision requests, either async or waiting for the result
 - **HumanStep Trigger** node — start workflows when decisions are resolved
 
 ## Installation
@@ -41,21 +41,31 @@ Use **Test** in n8n to verify the credential against `GET /api/team`.
 ### HumanStep (action)
 
 **Resource:** Validation  
-**Operation:** Create Decision
+**Operations:** Create Decision, Create Decision and Wait
 
 Creates a pending decision in HumanStep and returns the decision object (including `resolve_url` for reviewers).
+
+- **Create Decision** returns immediately. Use this when another workflow should continue from the **HumanStep Trigger** node.
+- **Create Decision and Wait** keeps the current execution open, polls HumanStep until the decision is resolved, then returns the resolved decision to downstream nodes.
 
 **Simple validation (no template)**
 
 - Set **Use Template** to `false`
 - Enter a **Question Title** (e.g. "Approve this expense?")
 - Optionally add a JSON **Payload** with context for the reviewer
+- Optionally add a **Callback URL** if you want HumanStep to call a specific endpoint when the decision resolves
 
 **Template-based decision**
 
 - Set **Use Template** to `true`
 - Select a **Review Template**
 - Map template **Fields** using the resource mapper
+- Optionally set **Priority**, **External ID**, or **Callback URL** in **Additional Options**
+
+For **Create Decision and Wait**, configure **Wait Options**:
+
+- **Poll Interval (Seconds)** — how often n8n checks the decision status (default: 2)
+- **Timeout (Minutes)** — maximum wait before the node fails (default: 5)
 
 ### HumanStep Trigger
 
@@ -71,11 +81,20 @@ When you activate the workflow, the trigger registers a webhook with HumanStep. 
 
 ## Example workflows
 
-### Request approval before continuing
+### Request approval and continue in another workflow
 
 1. **HTTP Request** — fetch data to review
 2. **HumanStep** — Create Decision with the data as payload
 3. **HumanStep Trigger** (separate workflow) — on resolve, continue downstream steps (notify, update CRM, etc.)
+
+This is the best fit for very long waits because n8n does not need to keep the original execution open.
+
+### Request approval before continuing in the same workflow
+
+1. **HTTP Request** — fetch data to review
+2. **HumanStep** — Create Decision and Wait
+3. **IF** — check `$json.status === "approved"`
+4. Continue with the approved, rejected, or changes-requested branch
 
 ### React when a template decision is approved
 

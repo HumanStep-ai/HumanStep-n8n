@@ -57,6 +57,21 @@ Restart n8n, then add **HumanStep API** credentials and the nodes in the editor.
 2. Select a template and fill mapped fields
 3. Execute — verify decision is created with correct payload
 
+### Action node — create and wait
+
+1. Add **HumanStep** → Create Decision and Wait
+2. Use either simple or template mode
+3. Set **Wait Options** to a short poll interval for testing
+4. Execute the node, then resolve the decision in HumanStep
+5. Verify the node returns the resolved decision with a terminal `status`
+
+### Action node — wait timeout
+
+1. Add **HumanStep** → Create Decision and Wait
+2. Set **Timeout (Minutes)** to the shortest practical value
+3. Execute without resolving the decision
+4. Verify the node fails with a timeout error, or returns an error item when **Continue On Fail** is enabled
+
 ### Trigger — all decisions
 
 1. Add **HumanStep Trigger**, **Use Template**: `false`
@@ -81,13 +96,16 @@ Restart n8n, then add **HumanStep API** credentials and the nodes in the editor.
 ```
 n8n Trigger Node  --POST /api/webhooks-->  api.humanstep.ai
 HumanStep app worker  --POST webhook URL-->  n8n Trigger Node
+
+HumanStep Action Node  --POST /api/decisions-->  api.humanstep.ai
+HumanStep Action Node  --GET /api/decisions/:id-->  api.humanstep.ai (Create Decision and Wait only)
 ```
 
 Webhook delivery is handled by the HumanStep web app (`app.humanstep.ai`), not the public API. The trigger registers webhooks via `api.humanstep.ai`; when a decision is resolved, the app worker delivers the event to your n8n webhook URL.
 
 ## Known limitations (v0.1.0)
 
-- **Create Decision** returns immediately after creating the decision; it does not poll or wait for resolution. Use the trigger node or a separate workflow to react to outcomes.
+- **Create Decision and Wait** polls from the running n8n execution. For very long waits, prefer **Create Decision** plus **HumanStep Trigger** in a separate workflow.
 - **Schema autocomplete** on the trigger may require at least one real resolved decision; automatic test payloads on webhook registration are not yet exposed on the public API.
 
 ## Publishing to npm
