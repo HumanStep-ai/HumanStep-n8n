@@ -98,12 +98,6 @@ export function getAppBaseUrl(apiBaseUrl: string): string {
 	return normalized.replace(/\/api$/i, '');
 }
 
-function isExecuteContext(
-	context: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
-): context is IExecuteFunctions {
-	return typeof (context as IExecuteFunctions).getInputData === 'function';
-}
-
 async function performHttpRequest(
 	context: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
 	options: {
@@ -114,19 +108,8 @@ async function performHttpRequest(
 	},
 ): Promise<JsonObject> {
 	const hasBody = options.body !== undefined && Object.keys(options.body).length > 0;
-	const useHttpRequest = isExecuteContext(context) && !!context.helpers.httpRequest;
 
-	if (useHttpRequest) {
-		const httpOptions: IHttpRequestOptions = {
-			method: options.method as IHttpRequestOptions['method'],
-			url: options.url,
-			headers: options.headers,
-			timeout: REQUEST_TIMEOUT_MS,
-			...(hasBody ? { body: options.body } : {}),
-		};
-		return (await context.helpers.httpRequest!(httpOptions)) as JsonObject;
-	}
-
+	// Prefer helpers.request — this is what the trigger webhook path uses successfully.
 	if (context.helpers.request) {
 		const legacyOptions: JsonObject = {
 			method: options.method,

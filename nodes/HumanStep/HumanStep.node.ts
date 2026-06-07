@@ -298,15 +298,37 @@ function fieldsValueNeedsVariantSchema(fieldsValue: Record<string, unknown>): bo
 	return Object.keys(fieldsValue).some((key) => key.startsWith(VARIANT_FIELD_PREFIX));
 }
 
-function getMappedFieldValues(executeFunctions: IExecuteFunctions, itemIndex: number): Record<string, unknown> {
-	// Reading `fields` directly can hang in execute on some n8n versions because it
-	// re-triggers the resource mapper loader. Dot notation avoids that deadlock.
-	const directValue = executeFunctions.getNodeParameter('fields.value', itemIndex, {}) as Record<
-		string,
-		unknown
-	>;
-	if (directValue && typeof directValue === 'object' && !Array.isArray(directValue)) {
-		return directValue;
+function isExpressionValue(value: unknown): value is string {
+	return typeof value === 'string' && value.startsWith('=');
+}
+
+function getStoredNodeParameters(executeFunctions: IExecuteFunctions): Record<string, unknown> {
+	return executeFunctions.getNode().parameters as Record<string, unknown>;
+}
+
+function resolveNodeParameter(
+	executeFunctions: IExecuteFunctions,
+	itemIndex: number,
+	name: string,
+	storedValue: unknown,
+	fallback?: unknown,
+): unknown {
+	if (isExpressionValue(storedValue)) {
+		return executeFunctions.getNodeParameter(name, itemIndex, fallback);
+	}
+	if (storedValue !== undefined && storedValue !== null) {
+		return storedValue;
+	}
+	return fallback;
+}
+
+function getMappedFieldValues(nodeParams: Record<string, unknown>): Record<string, unknown> {
+	// Never call getNodeParameter for `fields` during execute — it re-triggers the
+	// resource mapper loader (GET /templates/...) and can deadlock before POST.
+	const fieldsParam = nodeParams.fields as { value?: Record<string, unknown> | null } | undefined;
+	const value = fieldsParam?.value;
+	if (value && typeof value === 'object' && !Array.isArray(value)) {
+		return value;
 	}
 	return {};
 }
@@ -333,10 +355,13 @@ async function buildDecisionRequestBody(
 	executeFunctions: IExecuteFunctions,
 	itemIndex: number,
 ): Promise<JsonObject> {
-	const useTemplate = executeFunctions.getNodeParameter('useTemplate', itemIndex) as boolean;
+	const nodeParams = getStoredNodeParameters(executeFunctions);
+	const useTemplate = resolveNodeParameter(executeFunctions, itemIndex, 'useTemplate', nodeParams.useTemplate, false) === true;
 
 	if (useTemplate) {
-		const templateId = extractTemplateId(executeFunctions.getNodeParameter('templateId', itemIndex));
+		const templateId = extractTemplateId(
+			resolveNodeParameter(executeFunctions, itemIndex, 'templateId', nodeParams.templateId),
+		);
 		if (!templateId) {
 			throw new NodeOperationError(
 				executeFunctions.getNode(),
@@ -344,22 +369,11 @@ async function buildDecisionRequestBody(
 				{ itemIndex },
 			);
 		}
-		const fieldsValue = getMappedFieldValues(executeFunctions, itemIndex);
-		const priority = executeFunctions.getNodeParameter(
-			'additionalOptions.priority',
-			itemIndex,
-			'',
-		) as string;
-		const externalId = executeFunctions.getNodeParameter(
-			'additionalOptions.externalId',
-			itemIndex,
-			'',
-		) as string;
-		const callbackUrl = executeFunctions.getNodeParameter(
-			'additionalOptions.callbackUrl',
-			itemIndex,
-			'',
-		) as string;
+		const fieldsValue = getMappedFieldValues(nodeParams);
+		const additionalOptions = (nodeParams.additionalOptions ?? {}) as Record<string, unknown>;
+		const priority = additionalOptions.priority as string | undefined;
+		const externalId = additionalOptions.externalId as string | undefined;
+		const callbackUrl = additionalOptions.callbackUrl as string | undefined;
 		let payload: JsonObject = {};
 
 		if (Object.keys(fieldsValue).length > 0) {
@@ -400,9 +414,12 @@ async function buildDecisionRequestBody(
 		return requestBody;
 	}
 
-	const questionTitle = executeFunctions.getNodeParameter('questionTitle', itemIndex) as string;
-	const payloadJson = executeFunctions.getNodeParameter('options.payloadJson', itemIndex, '{}');
-	const callbackUrl = executeFunctions.getNodeParameter('options.callbackUrl', itemIndex, '') as string;
+	const questionTitle = String(
+		resolveNodeParameter(executeFunctions, itemIndex, 'questionTitle', nodeParams.questionTitle, ''),
+	);
+	const options = (nodeParams.options ?? {}) as Record<string, unknown>;
+	const payloadJson = options.payloadJson ?? '{}';
+	const callbackUrl = (options.callbackUrl as string | undefined) ?? '';
 	let payload: JsonObject = {};
 	try {
 		payload = parsePayloadJson(payloadJson);
@@ -847,8 +864,9 @@ export class HumanStep implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		let items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
-		const resource = this.getNodeParameter('resource', 0) as string;
-		const operation = this.getNodeParameter('operation', 0) as string;
+		const nodeParams = getStoredNodeParameters(this);
+		const resource = String(nodeParams.resource ?? 'validation');
+		const operation = String(nodeParams.operation ?? 'createDecision');
 
 		// Allow manual step execution without upstream input (common in the n8n editor).
 		if (items.length === 0) {
@@ -872,16 +890,9 @@ export class HumanStep implements INodeType {
 									{ itemIndex: i },
 								);
 							}
-							const pollIntervalSeconds = this.getNodeParameter(
-								'waitOptions.pollIntervalSeconds',
-								i,
-								2,
-							) as number;
-							const timeoutMinutes = this.getNodeParameter(
-								'waitOptions.timeoutMinutes',
-								i,
-								5,
-							) as number;
+							const waitOptions = (nodeParams.waitOptions ?? {}) as Record<string, number>;
+							const pollIntervalSeconds = waitOptions.pollIntervalSeconds ?? 2;
+							const timeoutMinutes = waitOptions.timeoutMinutes ?? 5;
 							const resolveUrl =
 								typeof responseData.resolve_url === 'string' ? responseData.resolve_url : undefined;
 							outputData = await waitForDecision.call(this, decisionId, {
