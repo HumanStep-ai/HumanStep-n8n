@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-humanstep",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "n8n community node for HumanStep — add human decision steps to your automation workflows",
   "keywords": [
     "n8n-community-node-package",
