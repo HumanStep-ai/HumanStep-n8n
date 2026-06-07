@@ -1,7 +1,6 @@
 import {
 	IExecuteFunctions,
 	IHookFunctions,
-	IHttpRequestOptions,
 	ILoadOptionsFunctions,
 	IWebhookFunctions,
 	JsonObject,
@@ -16,20 +15,6 @@ const REQUEST_TIMEOUT_MS = 60_000;
 
 function normalizeBaseUrl(baseUrl: string): string {
 	return baseUrl.replace(/\/+$/, '');
-}
-
-function appendQueryParams(url: string, qs: JsonObject): string {
-	if (Object.keys(qs).length === 0) {
-		return url;
-	}
-
-	const parsed = new URL(url);
-	for (const [key, value] of Object.entries(qs)) {
-		if (value !== undefined && value !== null) {
-			parsed.searchParams.set(key, String(value));
-		}
-	}
-	return parsed.toString();
 }
 
 function formatApiError(error: unknown): string {
@@ -99,59 +84,6 @@ export function getAppBaseUrl(apiBaseUrl: string): string {
 	return normalized.replace(/\/api$/i, '');
 }
 
-async function performHttpRequest(
-	context: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
-	options: {
-		method: string;
-		url: string;
-		headers: Record<string, string>;
-		body?: JsonObject;
-	},
-): Promise<JsonObject> {
-	const hasBody = options.body !== undefined && Object.keys(options.body).length > 0;
-	const helper =
-		typeof context.helpers.request === 'function'
-			? 'request'
-			: typeof context.helpers.httpRequest === 'function'
-				? 'httpRequest'
-				: 'none';
-	humanStepDebug('http', `→ ${options.method} ${options.url}`, {
-		helper,
-		hasBody,
-		bodyKeys: hasBody && options.body ? Object.keys(options.body) : [],
-	});
-
-	// Prefer helpers.request — this is what the trigger webhook path uses successfully.
-	if (context.helpers.request) {
-		const legacyOptions: JsonObject = {
-			method: options.method,
-			uri: options.url,
-			headers: options.headers,
-			json: true,
-			timeout: REQUEST_TIMEOUT_MS,
-			...(hasBody && options.body ? { body: options.body } : {}),
-		};
-		const response = (await context.helpers.request(legacyOptions)) as JsonObject;
-		humanStepDebug('http', `← ${options.method} ${options.url} (request)`);
-		return response;
-	}
-
-	if (context.helpers.httpRequest) {
-		const httpOptions: IHttpRequestOptions = {
-			method: options.method as IHttpRequestOptions['method'],
-			url: options.url,
-			headers: options.headers,
-			timeout: REQUEST_TIMEOUT_MS,
-			...(hasBody ? { body: options.body } : {}),
-		};
-		const response = (await context.helpers.httpRequest(httpOptions)) as JsonObject;
-		humanStepDebug('http', `← ${options.method} ${options.url} (httpRequest)`);
-		return response;
-	}
-
-	throw new Error('HumanStep node: HTTP helpers are unavailable in this n8n version');
-}
-
 export async function humanStepApiRequest(
 	this: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
 	method: string,
@@ -161,12 +93,6 @@ export async function humanStepApiRequest(
 	uri?: string,
 	option: JsonObject = {},
 ): Promise<JsonObject> {
-	humanStepDebug('api', `humanStepApiRequest ${method} ${resource}`, {
-		qsKeys: Object.keys(qs),
-		bodyKeys: Object.keys(body),
-		hasCustomUri: Boolean(uri),
-	});
-
 	const credentials = await this.getCredentials('humanStepApi');
 
 	if (credentials === undefined) {
@@ -175,32 +101,42 @@ export async function humanStepApiRequest(
 	}
 
 	const baseUrl = normalizeBaseUrl((credentials.baseUrl as string) || DEFAULT_BASE_URL);
-	humanStepDebug('api', 'credentials loaded', { baseUrl });
 	const path = resource.startsWith('/') ? resource : `/${resource}`;
-	let targetUrl = appendQueryParams(uri || `${baseUrl}${path}`, qs);
+	const targetUri = uri || `${baseUrl}${path}`;
 
-	if (Object.keys(option).length !== 0 && typeof option.uri === 'string') {
-		targetUrl = appendQueryParams(option.uri as string, qs);
-	}
-
-	const headers = {
-		'Content-Type': 'application/json',
-		Authorization: `Bearer ${credentials.apiKey as string}`,
+	// Proven shape from 0.1.4: pass options straight to helpers.request.
+	const options: JsonObject = {
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${credentials.apiKey as string}`,
+		},
+		method,
+		body,
+		qs,
+		uri: targetUri,
+		json: true,
+		timeout: REQUEST_TIMEOUT_MS,
 	};
 
+	if (Object.keys(option).length !== 0) {
+		Object.assign(options, option);
+	}
+
+	if (Object.keys(body).length === 0) {
+		delete options.body;
+	}
+
+	humanStepDebug('api', `→ ${method} ${targetUri}`, {
+		qsKeys: Object.keys(qs),
+		bodyKeys: Object.keys(body),
+	});
+
 	try {
-		const response = await performHttpRequest(this, {
-			method,
-			url: targetUrl,
-			headers,
-			body: Object.keys(body).length > 0 ? body : undefined,
-		});
-		humanStepDebug('api', `humanStepApiRequest ${method} ${resource} succeeded`);
+		const response = (await this.helpers.request!(options)) as JsonObject;
+		humanStepDebug('api', `← ${method} ${targetUri} ok`);
 		return response;
 	} catch (error) {
-		humanStepDebug('api', `humanStepApiRequest ${method} ${resource} failed`, {
-			error: formatApiError(error),
-		});
+		humanStepDebug('api', `✗ ${method} ${targetUri} failed`, { error: formatApiError(error) });
 		throw new Error(formatApiError(error));
 	}
 }

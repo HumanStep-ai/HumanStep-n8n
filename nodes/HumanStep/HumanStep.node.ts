@@ -299,41 +299,6 @@ function fieldsValueNeedsVariantSchema(fieldsValue: Record<string, unknown>): bo
 	return Object.keys(fieldsValue).some((key) => key.startsWith(VARIANT_FIELD_PREFIX));
 }
 
-function isExpressionValue(value: unknown): value is string {
-	return typeof value === 'string' && value.startsWith('=');
-}
-
-function getStoredNodeParameters(executeFunctions: IExecuteFunctions): Record<string, unknown> {
-	return executeFunctions.getNode().parameters as Record<string, unknown>;
-}
-
-function resolveNodeParameter(
-	executeFunctions: IExecuteFunctions,
-	itemIndex: number,
-	name: string,
-	storedValue: unknown,
-	fallback?: unknown,
-): unknown {
-	if (isExpressionValue(storedValue)) {
-		return executeFunctions.getNodeParameter(name, itemIndex, fallback);
-	}
-	if (storedValue !== undefined && storedValue !== null) {
-		return storedValue;
-	}
-	return fallback;
-}
-
-function getMappedFieldValues(nodeParams: Record<string, unknown>): Record<string, unknown> {
-	// Never call getNodeParameter for `fields` during execute — it re-triggers the
-	// resource mapper loader (GET /templates/...) and can deadlock before POST.
-	const fieldsParam = nodeParams.fields as { value?: Record<string, unknown> | null } | undefined;
-	const value = fieldsParam?.value;
-	if (value && typeof value === 'object' && !Array.isArray(value)) {
-		return value;
-	}
-	return {};
-}
-
 function parsePayloadJson(value: unknown): JsonObject {
 	if (value === undefined || value === null || value === '') {
 		return {};
@@ -356,15 +321,11 @@ async function buildDecisionRequestBody(
 	executeFunctions: IExecuteFunctions,
 	itemIndex: number,
 ): Promise<JsonObject> {
-	humanStepDebug('buildBody', `start item ${itemIndex}`);
-	const nodeParams = getStoredNodeParameters(executeFunctions);
-	const useTemplate = resolveNodeParameter(executeFunctions, itemIndex, 'useTemplate', nodeParams.useTemplate, false) === true;
+	const useTemplate = executeFunctions.getNodeParameter('useTemplate', itemIndex) as boolean;
 	humanStepDebug('buildBody', `useTemplate=${useTemplate}`, { itemIndex });
 
 	if (useTemplate) {
-		const templateId = extractTemplateId(
-			resolveNodeParameter(executeFunctions, itemIndex, 'templateId', nodeParams.templateId),
-		);
+		const templateId = extractTemplateId(executeFunctions.getNodeParameter('templateId', itemIndex));
 		if (!templateId) {
 			throw new NodeOperationError(
 				executeFunctions.getNode(),
@@ -372,16 +333,24 @@ async function buildDecisionRequestBody(
 				{ itemIndex },
 			);
 		}
-		const fieldsValue = getMappedFieldValues(nodeParams);
+
+		const fieldsData = executeFunctions.getNodeParameter('fields', itemIndex, {}) as {
+			value?: Record<string, unknown> | null;
+		};
+		const fieldsValue =
+			fieldsData.value && typeof fieldsData.value === 'object' ? fieldsData.value : {};
+
+		const additionalOptions = executeFunctions.getNodeParameter(
+			'additionalOptions',
+			itemIndex,
+			{},
+		) as { priority?: string; externalId?: string; callbackUrl?: string };
+
 		humanStepDebug('buildBody', 'template mode', {
 			templateId,
 			fieldCount: Object.keys(fieldsValue).length,
-			hasVariants: fieldsValueNeedsVariantSchema(fieldsValue),
 		});
-		const additionalOptions = (nodeParams.additionalOptions ?? {}) as Record<string, unknown>;
-		const priority = additionalOptions.priority as string | undefined;
-		const externalId = additionalOptions.externalId as string | undefined;
-		const callbackUrl = additionalOptions.callbackUrl as string | undefined;
+
 		let payload: JsonObject = {};
 
 		if (Object.keys(fieldsValue).length > 0) {
@@ -403,11 +372,11 @@ async function buildDecisionRequestBody(
 				}
 			}
 		}
-		if (priority) {
-			payload.priority = priority;
+		if (additionalOptions.priority) {
+			payload.priority = additionalOptions.priority;
 		}
-		if (externalId) {
-			payload.external_id = externalId;
+		if (additionalOptions.externalId) {
+			payload.external_id = additionalOptions.externalId;
 		}
 
 		const requestBody: JsonObject = {
@@ -415,8 +384,8 @@ async function buildDecisionRequestBody(
 			payload,
 		};
 
-		if (callbackUrl) {
-			requestBody.callback_url = callbackUrl;
+		if (additionalOptions.callbackUrl) {
+			requestBody.callback_url = additionalOptions.callbackUrl;
 		}
 
 		humanStepDebug('buildBody', 'template request body ready', {
@@ -426,15 +395,14 @@ async function buildDecisionRequestBody(
 		return requestBody;
 	}
 
-	const questionTitle = String(
-		resolveNodeParameter(executeFunctions, itemIndex, 'questionTitle', nodeParams.questionTitle, ''),
-	);
-	const options = (nodeParams.options ?? {}) as Record<string, unknown>;
-	const payloadJson = options.payloadJson ?? '{}';
-	const callbackUrl = (options.callbackUrl as string | undefined) ?? '';
+	const questionTitle = executeFunctions.getNodeParameter('questionTitle', itemIndex) as string;
+	const options = executeFunctions.getNodeParameter('options', itemIndex, {}) as {
+		payloadJson?: unknown;
+		callbackUrl?: string;
+	};
 	let payload: JsonObject = {};
 	try {
-		payload = parsePayloadJson(payloadJson);
+		payload = parsePayloadJson(options.payloadJson ?? '{}');
 	} catch {
 		throw new NodeOperationError(executeFunctions.getNode(), 'Payload JSON is invalid', {
 			itemIndex,
@@ -445,8 +413,8 @@ async function buildDecisionRequestBody(
 		payload,
 	};
 
-	if (callbackUrl) {
-		requestBody.callback_url = callbackUrl;
+	if (options.callbackUrl) {
+		requestBody.callback_url = options.callbackUrl;
 	}
 
 	humanStepDebug('buildBody', 'simple request body ready', {
@@ -885,9 +853,8 @@ export class HumanStep implements INodeType {
 
 		let items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
-		const nodeParams = getStoredNodeParameters(this);
-		const resource = String(nodeParams.resource ?? 'validation');
-		const operation = String(nodeParams.operation ?? 'createDecision');
+		const resource = this.getNodeParameter('resource', 0) as string;
+		const operation = this.getNodeParameter('operation', 0) as string;
 
 		humanStepDebug('execute', 'parameters', { resource, operation, inputItems: items.length });
 
@@ -919,7 +886,10 @@ export class HumanStep implements INodeType {
 									{ itemIndex: i },
 								);
 							}
-							const waitOptions = (nodeParams.waitOptions ?? {}) as Record<string, number>;
+							const waitOptions = this.getNodeParameter('waitOptions', i, {}) as {
+								pollIntervalSeconds?: number;
+								timeoutMinutes?: number;
+							};
 							const pollIntervalSeconds = waitOptions.pollIntervalSeconds ?? 2;
 							const timeoutMinutes = waitOptions.timeoutMinutes ?? 5;
 							const resolveUrl =
