@@ -183,13 +183,13 @@ function buildVariantSelectorDescription(field: any): string | undefined {
 	return [...descriptionParts, details.join('; ')].filter(Boolean).join(' ');
 }
 
-function createMapperField(field: any, id?: string, displayName?: string) {
+function createMapperField(field: any, id?: string, displayName?: string, description?: string) {
 	const fieldType = field.type || 'text';
 
 	return {
 		id: id ?? getFieldKey(field),
 		displayName: displayName ?? `${getFieldLabel(field)} (${fieldType})`,
-		description: buildVariantSelectorDescription(field),
+		description: description ?? buildVariantSelectorDescription(field),
 		required: field.required || false,
 		defaultMatch: false,
 		canBeUsedToMatch: false,
@@ -221,7 +221,11 @@ function expandVariantSelectorFields(field: any, requestedCount: number) {
 			fields.push(createMapperField(
 				subField,
 				encodeVariantFieldId(parentKey, variantIndex, subFieldKey),
-				`${parentLabel} / Variation ${variantLabel} / ${getFieldLabel(subField)} (${subField.type || 'text'})`,
+				`[${variantLabel}] ${getFieldLabel(subField)}`,
+				[
+					`${parentLabel} / Variation ${variantLabel} / ${getFieldLabel(subField)}`,
+					subField.description || subField.helpText,
+				].filter(Boolean).join(' '),
 			));
 		}
 	}
