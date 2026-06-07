@@ -11,13 +11,6 @@ import {
 const DEFAULT_BASE_URL = 'https://api.humanstep.ai/api';
 const DEFAULT_WAIT_POLL_MS = 2000;
 const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
-const REQUEST_TIMEOUT_MS = 120_000;
-
-type HumanStepRequestContext =
-	| IExecuteFunctions
-	| ILoadOptionsFunctions
-	| IHookFunctions
-	| IWebhookFunctions;
 
 function normalizeBaseUrl(baseUrl: string): string {
 	return baseUrl.replace(/\/+$/, '');
@@ -42,7 +35,6 @@ function formatApiError(error: unknown): string {
 		message?: string;
 		error?: { message?: string };
 		response?: {
-			status?: number;
 			data?: { error?: string; message?: string } | string;
 			body?: { error?: string; message?: string };
 		};
@@ -65,43 +57,6 @@ function formatApiError(error: unknown): string {
 	}
 
 	return `HumanStep API error: ${err.message ?? 'Unknown error'}`;
-}
-
-async function performHttpRequest(
-	context: HumanStepRequestContext,
-	options: {
-		method: string;
-		url: string;
-		headers: Record<string, string>;
-		body?: JsonObject;
-	},
-): Promise<JsonObject> {
-	const hasBody = options.body !== undefined && Object.keys(options.body).length > 0;
-
-	if (context.helpers.httpRequest) {
-		const httpOptions: IHttpRequestOptions = {
-			method: options.method as IHttpRequestOptions['method'],
-			url: options.url,
-			headers: options.headers,
-			timeout: REQUEST_TIMEOUT_MS,
-			...(hasBody ? { body: options.body } : {}),
-		};
-		return (await context.helpers.httpRequest(httpOptions)) as JsonObject;
-	}
-
-	if (context.helpers.request) {
-		const legacyOptions: JsonObject = {
-			method: options.method,
-			uri: options.url,
-			headers: options.headers,
-			json: true,
-			timeout: REQUEST_TIMEOUT_MS,
-			...(hasBody && options.body ? { body: options.body } : {}),
-		};
-		return (await context.helpers.request(legacyOptions)) as JsonObject;
-	}
-
-	throw new Error('HumanStep node: HTTP helpers are unavailable in this n8n version');
 }
 
 function extractResourceLocatorValue(param: unknown): string | undefined {
@@ -143,12 +98,13 @@ export function getAppBaseUrl(apiBaseUrl: string): string {
 }
 
 export async function humanStepApiRequest(
-	this: HumanStepRequestContext,
+	this: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
 	method: string,
 	resource: string,
 	body: JsonObject = {},
 	qs: JsonObject = {},
 	uri?: string,
+	option: JsonObject = {},
 ): Promise<JsonObject> {
 	const credentials = await this.getCredentials('humanStepApi');
 
@@ -158,18 +114,45 @@ export async function humanStepApiRequest(
 
 	const baseUrl = normalizeBaseUrl((credentials.baseUrl as string) || DEFAULT_BASE_URL);
 	const path = resource.startsWith('/') ? resource : `/${resource}`;
-	const url = appendQueryParams(uri || `${baseUrl}${path}`, qs);
+	const targetUri = uri || `${baseUrl}${path}`;
+
+	const options: JsonObject = {
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${credentials.apiKey as string}`,
+		},
+		method,
+		body,
+		qs,
+		uri: targetUri,
+		json: true,
+	};
+
+	if (Object.keys(option).length !== 0) {
+		Object.assign(options, option);
+	}
+
+	if (Object.keys(body).length === 0) {
+		delete options.body;
+	}
 
 	try {
-		return await performHttpRequest(this, {
-			method,
-			url,
-			headers: {
-				'Content-Type': 'application/json',
-				Authorization: `Bearer ${credentials.apiKey as string}`,
-			},
-			body: Object.keys(body).length > 0 ? body : undefined,
-		});
+		// Prefer helpers.request — this is what worked in earlier n8n versions for this package.
+		if (this.helpers.request) {
+			return (await this.helpers.request(options)) as JsonObject;
+		}
+
+		if (this.helpers.httpRequest) {
+			const httpOptions: IHttpRequestOptions = {
+				method: method as IHttpRequestOptions['method'],
+				url: appendQueryParams(targetUri, qs),
+				headers: options.headers as Record<string, string>,
+				...(Object.keys(body).length > 0 ? { body } : {}),
+			};
+			return (await this.helpers.httpRequest(httpOptions)) as JsonObject;
+		}
+
+		throw new Error('HumanStep node: HTTP helpers are unavailable in this n8n version');
 	} catch (error) {
 		throw new Error(formatApiError(error));
 	}

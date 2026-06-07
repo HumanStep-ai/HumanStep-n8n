@@ -294,10 +294,6 @@ function buildVariantPayload(fieldsValue: Record<string, unknown>, schemaFields:
 	return payload;
 }
 
-function fieldsValueNeedsVariantSchema(fieldsValue: Record<string, unknown>): boolean {
-	return Object.keys(fieldsValue).some((key) => key.startsWith(VARIANT_FIELD_PREFIX));
-}
-
 function parsePayloadJson(value: unknown): JsonObject {
 	if (value === undefined || value === null || value === '') {
 		return {};
@@ -342,16 +338,10 @@ async function buildDecisionRequestBody(
 		let payload: JsonObject = {};
 
 		if (fieldsData.value && typeof fieldsData.value === 'object') {
-			if (fieldsValueNeedsVariantSchema(fieldsData.value)) {
-				const response = await humanStepApiRequest.call(
-					executeFunctions,
-					'GET',
-					`/templates/${templateId}`,
-				);
-				const schemaFields = response.fields_schema || response.fieldsSchema || [];
-				payload = Array.isArray(schemaFields)
-					? buildVariantPayload(fieldsData.value, schemaFields)
-					: {};
+			const response = await humanStepApiRequest.call(executeFunctions, 'GET', `/templates/${templateId}`);
+			const schemaFields = response.fields_schema || response.fieldsSchema || [];
+			if (Array.isArray(schemaFields)) {
+				payload = buildVariantPayload(fieldsData.value, schemaFields);
 			} else {
 				for (const [key, value] of Object.entries(fieldsData.value)) {
 					if (isNonEmptyValue(value)) {
