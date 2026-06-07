@@ -39,6 +39,7 @@ function mapFieldType(hsType: string): FieldType {
 			return 'array';
 		case 'json':
 		case 'key_value':
+		case 'variant_selector':
 			return 'object';
 		case 'url':
 		case 'email':
@@ -49,6 +50,41 @@ function mapFieldType(hsType: string): FieldType {
 		default:
 			return 'string';
 	}
+}
+
+function buildVariantSelectorDescription(field: any): string | undefined {
+	if (field.type !== 'variant_selector') {
+		return field.description || field.helpText || undefined;
+	}
+
+	const descriptionParts = [field.description || field.helpText].filter(Boolean);
+	const details: string[] = [];
+	const minVariants = field.minVariants ?? field.min_variants;
+	const maxVariants = field.maxVariants ?? field.max_variants;
+	const selectionMode = field.selectionMode ?? field.selection_mode;
+	const subFields = field.subFields ?? field.sub_fields;
+
+	if (minVariants !== undefined || maxVariants !== undefined) {
+		details.push(
+			`variants: ${minVariants ?? '?'}-${maxVariants ?? '?'}`
+		);
+	}
+	if (selectionMode) {
+		details.push(`selection: ${selectionMode}`);
+	}
+	if (Array.isArray(subFields) && subFields.length > 0) {
+		const subFieldKeys = subFields
+			.map((subField: any) => subField.key || subField.id)
+			.filter(Boolean)
+			.join(', ');
+		if (subFieldKeys) {
+			details.push(`sub-fields: ${subFieldKeys}`);
+		}
+	}
+
+	details.push('Expected object: {"variants":[{...}],"selected":0}');
+
+	return [...descriptionParts, details.join('; ')].filter(Boolean).join(' ');
 }
 
 function parsePayloadJson(value: unknown): JsonObject {
@@ -500,6 +536,7 @@ export class HumanStep implements INodeType {
 						return {
 							id: fieldId,
 							displayName: `${displayName} (${fieldType})`,
+							description: buildVariantSelectorDescription(field),
 							required: field.required || false,
 							defaultMatch: false,
 							canBeUsedToMatch: false,
