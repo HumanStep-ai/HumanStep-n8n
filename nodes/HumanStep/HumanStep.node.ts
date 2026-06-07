@@ -14,6 +14,16 @@ import {
 import { extractTemplateId, humanStepApiRequest, listActiveTemplates, waitForDecision } from './GenericFunctions';
 
 const CREATE_DECISION_OPERATIONS = ['createDecision', 'createDecisionAndWait'];
+const VARIANT_FIELD_PREFIX = '__humanstepVariant__';
+const DEFAULT_VARIANT_GROUPS_TO_SHOW = 2;
+
+type VariantSelectionMode = 'single' | 'multiple';
+
+interface VariantFieldReference {
+	parentKey: string;
+	variantIndex: number;
+	subFieldKey: string;
+}
 
 // Map HumanStep field types to n8n field types
 function mapFieldType(hsType: string): FieldType {
@@ -52,6 +62,97 @@ function mapFieldType(hsType: string): FieldType {
 	}
 }
 
+function isNonEmptyValue(value: unknown): boolean {
+	return value !== undefined && value !== null && value !== '';
+}
+
+function getFieldKey(field: any): string {
+	return field.key || field.id;
+}
+
+function getFieldLabel(field: any): string {
+	return field.label || field.key || field.id;
+}
+
+function getFieldSubFields(field: any): any[] {
+	const subFields = field.subFields ?? field.sub_fields;
+	return Array.isArray(subFields) ? subFields : [];
+}
+
+function getFieldOptions(field: any): Array<{ name: string; value: string }> | undefined {
+	const rawOptions = Array.isArray(field.options)
+		? field.options
+		: Array.isArray(field.statusOptions)
+			? field.statusOptions
+			: Array.isArray(field.status_options)
+				? field.status_options
+				: undefined;
+
+	if (!rawOptions) {
+		return undefined;
+	}
+
+	return rawOptions.map((opt: any) => ({
+		name: opt.label || opt.value || opt,
+		value: opt.value || opt,
+	}));
+}
+
+function encodeVariantFieldId(parentKey: string, variantIndex: number, subFieldKey: string): string {
+	return [
+		VARIANT_FIELD_PREFIX,
+		encodeURIComponent(parentKey),
+		String(variantIndex),
+		encodeURIComponent(subFieldKey),
+	].join('::');
+}
+
+function decodeVariantFieldId(fieldId: string): VariantFieldReference | undefined {
+	const [prefix, encodedParentKey, variantIndexValue, encodedSubFieldKey] = fieldId.split('::');
+	if (
+		prefix !== VARIANT_FIELD_PREFIX ||
+		!encodedParentKey ||
+		!encodedSubFieldKey ||
+		variantIndexValue === undefined
+	) {
+		return undefined;
+	}
+
+	const variantIndex = Number(variantIndexValue);
+	if (!Number.isInteger(variantIndex) || variantIndex < 0) {
+		return undefined;
+	}
+
+	return {
+		parentKey: decodeURIComponent(encodedParentKey),
+		variantIndex,
+		subFieldKey: decodeURIComponent(encodedSubFieldKey),
+	};
+}
+
+function getVariantBounds(field: any): { minVariants: number; maxVariants?: number } {
+	const rawMin = Number(field.minVariants ?? field.min_variants);
+	const rawMax = Number(field.maxVariants ?? field.max_variants);
+	const minVariants = Number.isFinite(rawMin) && rawMin > 0 ? Math.floor(rawMin) : 1;
+	const maxVariants = Number.isFinite(rawMax) && rawMax > 0 ? Math.floor(rawMax) : undefined;
+
+	return { minVariants, maxVariants };
+}
+
+function getVariantGroupCount(field: any, requestedCount: number): number {
+	const { minVariants, maxVariants } = getVariantBounds(field);
+	const normalizedRequested = Number.isFinite(requestedCount) && requestedCount > 0
+		? Math.floor(requestedCount)
+		: DEFAULT_VARIANT_GROUPS_TO_SHOW;
+	const minAdjusted = Math.max(normalizedRequested, minVariants);
+
+	return maxVariants ? Math.min(minAdjusted, maxVariants) : minAdjusted;
+}
+
+function getVariantSelectionMode(field: any): VariantSelectionMode {
+	return field.selectionMode === 'multiple' || field.selection_mode === 'multiple' ? 'multiple' : 'single';
+}
+
 function buildVariantSelectorDescription(field: any): string | undefined {
 	if (field.type !== 'variant_selector') {
 		return field.description || field.helpText || undefined;
@@ -59,22 +160,17 @@ function buildVariantSelectorDescription(field: any): string | undefined {
 
 	const descriptionParts = [field.description || field.helpText].filter(Boolean);
 	const details: string[] = [];
-	const minVariants = field.minVariants ?? field.min_variants;
-	const maxVariants = field.maxVariants ?? field.max_variants;
-	const selectionMode = field.selectionMode ?? field.selection_mode;
-	const subFields = field.subFields ?? field.sub_fields;
+	const { minVariants, maxVariants } = getVariantBounds(field);
+	const selectionMode = getVariantSelectionMode(field);
+	const subFields = getFieldSubFields(field);
 
-	if (minVariants !== undefined || maxVariants !== undefined) {
-		details.push(
-			`variants: ${minVariants ?? '?'}-${maxVariants ?? '?'}`
-		);
-	}
+	details.push(`variants: ${minVariants}-${maxVariants ?? '?'}`);
 	if (selectionMode) {
 		details.push(`selection: ${selectionMode}`);
 	}
-	if (Array.isArray(subFields) && subFields.length > 0) {
+	if (subFields.length > 0) {
 		const subFieldKeys = subFields
-			.map((subField: any) => subField.key || subField.id)
+			.map((subField: any) => getFieldKey(subField))
 			.filter(Boolean)
 			.join(', ');
 		if (subFieldKeys) {
@@ -85,6 +181,113 @@ function buildVariantSelectorDescription(field: any): string | undefined {
 	details.push('Expected object: {"variants":[{...}],"selected":0}');
 
 	return [...descriptionParts, details.join('; ')].filter(Boolean).join(' ');
+}
+
+function createMapperField(field: any, id?: string, displayName?: string) {
+	const fieldType = field.type || 'text';
+
+	return {
+		id: id ?? getFieldKey(field),
+		displayName: displayName ?? `${getFieldLabel(field)} (${fieldType})`,
+		description: buildVariantSelectorDescription(field),
+		required: field.required || false,
+		defaultMatch: false,
+		canBeUsedToMatch: false,
+		display: true,
+		type: mapFieldType(fieldType),
+		options: getFieldOptions(field),
+	};
+}
+
+function expandVariantSelectorFields(field: any, requestedCount: number) {
+	const parentKey = getFieldKey(field);
+	const parentLabel = getFieldLabel(field);
+	const subFields = getFieldSubFields(field);
+	const variantCount = getVariantGroupCount(field, requestedCount);
+
+	if (!parentKey || subFields.length === 0) {
+		return [createMapperField(field)];
+	}
+
+	const fields = [];
+	for (let variantIndex = 0; variantIndex < variantCount; variantIndex++) {
+		const variantLabel = String.fromCharCode(65 + variantIndex);
+		for (const subField of subFields) {
+			const subFieldKey = getFieldKey(subField);
+			if (!subFieldKey) {
+				continue;
+			}
+
+			fields.push(createMapperField(
+				subField,
+				encodeVariantFieldId(parentKey, variantIndex, subFieldKey),
+				`${parentLabel} / Variation ${variantLabel} / ${getFieldLabel(subField)} (${subField.type || 'text'})`,
+			));
+		}
+	}
+
+	return fields;
+}
+
+function buildVariantPayload(fieldsValue: Record<string, unknown>, schemaFields: any[]): JsonObject {
+	const payload: JsonObject = {};
+	const variantFields = new Map<string, any>();
+	const variantValues = new Map<string, Map<number, Record<string, unknown>>>();
+
+	for (const field of schemaFields) {
+		const fieldKey = getFieldKey(field);
+		if (fieldKey && field.type === 'variant_selector') {
+			variantFields.set(fieldKey, field);
+		}
+	}
+
+	for (const [key, value] of Object.entries(fieldsValue)) {
+		if (!isNonEmptyValue(value)) {
+			continue;
+		}
+
+		const variantReference = decodeVariantFieldId(key);
+		if (!variantReference) {
+			payload[key] = value as JsonObject[string];
+			continue;
+		}
+
+		if (!variantFields.has(variantReference.parentKey)) {
+			continue;
+		}
+
+		let variants = variantValues.get(variantReference.parentKey);
+		if (!variants) {
+			variants = new Map<number, Record<string, unknown>>();
+			variantValues.set(variantReference.parentKey, variants);
+		}
+
+		let variant = variants.get(variantReference.variantIndex);
+		if (!variant) {
+			variant = {};
+			variants.set(variantReference.variantIndex, variant);
+		}
+
+		variant[variantReference.subFieldKey] = value;
+	}
+
+	for (const [parentKey, variantsByIndex] of variantValues.entries()) {
+		const field = variantFields.get(parentKey);
+		const variants = Array.from(variantsByIndex.entries())
+			.sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
+			.map(([, variant]) => variant);
+
+		if (variants.length === 0) {
+			continue;
+		}
+
+		payload[parentKey] = {
+			variants,
+			selected: getVariantSelectionMode(field) === 'multiple' ? [0] : 0,
+		} as JsonObject[string];
+	}
+
+	return payload;
 }
 
 function parsePayloadJson(value: unknown): JsonObject {
@@ -105,10 +308,10 @@ function getResponseDecisionId(response: JsonObject): string | undefined {
 	return typeof decision.id === 'string' ? decision.id : undefined;
 }
 
-function buildDecisionRequestBody(
+async function buildDecisionRequestBody(
 	executeFunctions: IExecuteFunctions,
 	itemIndex: number,
-): JsonObject {
+): Promise<JsonObject> {
 	const useTemplate = executeFunctions.getNodeParameter('useTemplate', itemIndex) as boolean;
 
 	if (useTemplate) {
@@ -128,12 +331,18 @@ function buildDecisionRequestBody(
 			itemIndex,
 			{},
 		) as Record<string, unknown>;
-		const payload: JsonObject = {};
+		let payload: JsonObject = {};
 
 		if (fieldsData.value && typeof fieldsData.value === 'object') {
-			for (const [key, value] of Object.entries(fieldsData.value)) {
-				if (value !== undefined && value !== null && value !== '') {
-					payload[key] = value as JsonObject[string];
+			const response = await humanStepApiRequest.call(executeFunctions, 'GET', `/templates/${templateId}`);
+			const schemaFields = response.fields_schema || response.fieldsSchema || [];
+			if (Array.isArray(schemaFields)) {
+				payload = buildVariantPayload(fieldsData.value, schemaFields);
+			} else {
+				for (const [key, value] of Object.entries(fieldsData.value)) {
+					if (isNonEmptyValue(value)) {
+						payload[key] = value as JsonObject[string];
+					}
 				}
 			}
 		}
@@ -323,6 +532,51 @@ export class HumanStep implements INodeType {
 				],
 			},
 			{
+				displayName: 'Variant Input Mode',
+				name: 'variantInputMode',
+				type: 'options',
+				default: 'expanded',
+				displayOptions: {
+					show: {
+						resource: ['validation'],
+						operation: CREATE_DECISION_OPERATIONS,
+						useTemplate: [true],
+					},
+				},
+				options: [
+					{
+						name: 'Expanded Sub-Fields',
+						value: 'expanded',
+						description: 'Show one field per variation sub-field in the mapper',
+					},
+					{
+						name: 'Raw JSON',
+						value: 'raw',
+						description: 'Show variant selectors as one object field for advanced JSON input',
+					},
+				],
+				description: 'How to enter HumanStep variant selector fields',
+			},
+			{
+				displayName: 'Variant Groups to Show',
+				name: 'variantGroupsToShow',
+				type: 'number',
+				default: DEFAULT_VARIANT_GROUPS_TO_SHOW,
+				displayOptions: {
+					show: {
+						resource: ['validation'],
+						operation: CREATE_DECISION_OPERATIONS,
+						useTemplate: [true],
+						variantInputMode: ['expanded'],
+					},
+				},
+				typeOptions: {
+					minValue: 1,
+				},
+				description:
+					'How many variation groups to show in n8n. The value is clamped to the selected template min/max variants.',
+			},
+			{
 				displayName: 'Fields',
 				name: 'fields',
 				type: 'resourceMapper',
@@ -339,7 +593,7 @@ export class HumanStep implements INodeType {
 					},
 				},
 				typeOptions: {
-					loadOptionsDependsOn: ['templateId.value'],
+					loadOptionsDependsOn: ['templateId.value', 'variantInputMode', 'variantGroupsToShow'],
 					resourceMapper: {
 						resourceMapperMethod: 'getTemplateFieldsMapping',
 						mode: 'add',
@@ -519,31 +773,15 @@ export class HumanStep implements INodeType {
 						return { fields: [] };
 					}
 
-					const fields = schemaFields.map((field: any) => {
-						const fieldId = field.key || field.id;
-						const displayName = field.label || field.key || field.id;
-						const fieldType = field.type || 'text';
-						const n8nType = mapFieldType(fieldType);
-
-						let options: Array<{ name: string; value: string }> | undefined;
-						if (field.options && Array.isArray(field.options)) {
-							options = field.options.map((opt: any) => ({
-								name: opt.label || opt.value || opt,
-								value: opt.value || opt,
-							}));
+					const variantInputMode = this.getCurrentNodeParameter('variantInputMode') as string | undefined;
+					const variantGroupsToShowParam = this.getCurrentNodeParameter('variantGroupsToShow') as number | undefined;
+					const variantGroupsToShow = Number(variantGroupsToShowParam ?? DEFAULT_VARIANT_GROUPS_TO_SHOW);
+					const fields = schemaFields.flatMap((field: any) => {
+						if (field.type === 'variant_selector' && variantInputMode !== 'raw') {
+							return expandVariantSelectorFields(field, variantGroupsToShow);
 						}
 
-						return {
-							id: fieldId,
-							displayName: `${displayName} (${fieldType})`,
-							description: buildVariantSelectorDescription(field),
-							required: field.required || false,
-							defaultMatch: false,
-							canBeUsedToMatch: false,
-							display: true,
-							type: n8nType,
-							options,
-						};
+						return [createMapperField(field)];
 					});
 
 					return { fields };
@@ -564,7 +802,7 @@ export class HumanStep implements INodeType {
 			try {
 				if (resource === 'validation') {
 					if (CREATE_DECISION_OPERATIONS.includes(operation)) {
-						const requestBody = buildDecisionRequestBody(this, i);
+						const requestBody = await buildDecisionRequestBody(this, i);
 						const responseData = await humanStepApiRequest.call(this, 'POST', '/decisions', requestBody);
 						let outputData = responseData;
 
