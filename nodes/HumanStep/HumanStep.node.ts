@@ -294,6 +294,10 @@ function buildVariantPayload(fieldsValue: Record<string, unknown>, schemaFields:
 	return payload;
 }
 
+function fieldsValueNeedsVariantSchema(fieldsValue: Record<string, unknown>): boolean {
+	return Object.keys(fieldsValue).some((key) => key.startsWith(VARIANT_FIELD_PREFIX));
+}
+
 function parsePayloadJson(value: unknown): JsonObject {
 	if (value === undefined || value === null || value === '') {
 		return {};
@@ -338,10 +342,16 @@ async function buildDecisionRequestBody(
 		let payload: JsonObject = {};
 
 		if (fieldsData.value && typeof fieldsData.value === 'object') {
-			const response = await humanStepApiRequest.call(executeFunctions, 'GET', `/templates/${templateId}`);
-			const schemaFields = response.fields_schema || response.fieldsSchema || [];
-			if (Array.isArray(schemaFields)) {
-				payload = buildVariantPayload(fieldsData.value, schemaFields);
+			if (fieldsValueNeedsVariantSchema(fieldsData.value)) {
+				const response = await humanStepApiRequest.call(
+					executeFunctions,
+					'GET',
+					`/templates/${templateId}`,
+				);
+				const schemaFields = response.fields_schema || response.fieldsSchema || [];
+				payload = Array.isArray(schemaFields)
+					? buildVariantPayload(fieldsData.value, schemaFields)
+					: {};
 			} else {
 				for (const [key, value] of Object.entries(fieldsData.value)) {
 					if (isNonEmptyValue(value)) {
@@ -371,9 +381,17 @@ async function buildDecisionRequestBody(
 
 	const questionTitle = executeFunctions.getNodeParameter('questionTitle', itemIndex) as string;
 	const options = executeFunctions.getNodeParameter('options', itemIndex, {}) as Record<string, unknown>;
+	let payload: JsonObject = {};
+	try {
+		payload = parsePayloadJson(options.payloadJson);
+	} catch {
+		throw new NodeOperationError(executeFunctions.getNode(), 'Payload JSON is invalid', {
+			itemIndex,
+		});
+	}
 	const requestBody: JsonObject = {
 		title: questionTitle,
-		payload: parsePayloadJson(options.payloadJson),
+		payload,
 	};
 
 	if (options.callbackUrl) {
@@ -671,6 +689,13 @@ export class HumanStep implements INodeType {
 				},
 				options: [
 					{
+						displayName:
+							'The decision is created immediately. This node then keeps running until it is resolved in HumanStep or the timeout is reached.',
+						name: 'waitNotice',
+						type: 'notice',
+						default: '',
+					},
+					{
 						displayName: 'Poll Interval (Seconds)',
 						name: 'pollIntervalSeconds',
 						type: 'number',
@@ -798,10 +823,15 @@ export class HumanStep implements INodeType {
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
-		const items = this.getInputData();
+		let items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 		const resource = this.getNodeParameter('resource', 0) as string;
 		const operation = this.getNodeParameter('operation', 0) as string;
+
+		// Allow manual step execution without upstream input (common in the n8n editor).
+		if (items.length === 0) {
+			items = [{ json: {}, pairedItem: { item: 0 } }];
+		}
 
 		for (let i = 0; i < items.length; i++) {
 			try {
@@ -821,9 +851,12 @@ export class HumanStep implements INodeType {
 								);
 							}
 							const waitOptions = this.getNodeParameter('waitOptions', i, {}) as Record<string, number>;
+							const resolveUrl =
+								typeof responseData.resolve_url === 'string' ? responseData.resolve_url : undefined;
 							outputData = await waitForDecision.call(this, decisionId, {
 								pollMs: (waitOptions.pollIntervalSeconds ?? 2) * 1000,
 								timeoutMs: (waitOptions.timeoutMinutes ?? 5) * 60 * 1000,
+								resolveUrl,
 							});
 						}
 

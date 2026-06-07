@@ -1,30 +1,63 @@
 import {
 	IExecuteFunctions,
 	IHookFunctions,
+	IHttpRequestOptions,
 	ILoadOptionsFunctions,
 	IWebhookFunctions,
 	JsonObject,
+	NodeOperationError,
 } from 'n8n-workflow';
 
 const DEFAULT_BASE_URL = 'https://api.humanstep.ai/api';
 const DEFAULT_WAIT_POLL_MS = 2000;
 const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 120_000;
+
+type HumanStepRequestContext =
+	| IExecuteFunctions
+	| ILoadOptionsFunctions
+	| IHookFunctions
+	| IWebhookFunctions;
 
 function normalizeBaseUrl(baseUrl: string): string {
 	return baseUrl.replace(/\/+$/, '');
+}
+
+function appendQueryParams(url: string, qs: JsonObject): string {
+	if (Object.keys(qs).length === 0) {
+		return url;
+	}
+
+	const parsed = new URL(url);
+	for (const [key, value] of Object.entries(qs)) {
+		if (value !== undefined && value !== null) {
+			parsed.searchParams.set(key, String(value));
+		}
+	}
+	return parsed.toString();
 }
 
 function formatApiError(error: unknown): string {
 	const err = error as {
 		message?: string;
 		error?: { message?: string };
-		response?: { body?: { error?: string; message?: string } };
+		response?: {
+			status?: number;
+			data?: { error?: string; message?: string } | string;
+			body?: { error?: string; message?: string };
+		};
 	};
 
-	const body = err.response?.body;
-	const apiMessage = body?.error ?? body?.message;
-	if (apiMessage) {
-		return `HumanStep API error: ${apiMessage}`;
+	const responseData = err.response?.data ?? err.response?.body;
+	if (typeof responseData === 'string' && responseData.trim()) {
+		return `HumanStep API error: ${responseData}`;
+	}
+	if (responseData && typeof responseData === 'object') {
+		const apiMessage =
+			(responseData as { error?: string }).error ?? (responseData as { message?: string }).message;
+		if (apiMessage) {
+			return `HumanStep API error: ${apiMessage}`;
+		}
 	}
 
 	if (err.error?.message) {
@@ -32,6 +65,43 @@ function formatApiError(error: unknown): string {
 	}
 
 	return `HumanStep API error: ${err.message ?? 'Unknown error'}`;
+}
+
+async function performHttpRequest(
+	context: HumanStepRequestContext,
+	options: {
+		method: string;
+		url: string;
+		headers: Record<string, string>;
+		body?: JsonObject;
+	},
+): Promise<JsonObject> {
+	const hasBody = options.body !== undefined && Object.keys(options.body).length > 0;
+
+	if (context.helpers.httpRequest) {
+		const httpOptions: IHttpRequestOptions = {
+			method: options.method as IHttpRequestOptions['method'],
+			url: options.url,
+			headers: options.headers,
+			timeout: REQUEST_TIMEOUT_MS,
+			...(hasBody ? { body: options.body } : {}),
+		};
+		return (await context.helpers.httpRequest(httpOptions)) as JsonObject;
+	}
+
+	if (context.helpers.request) {
+		const legacyOptions: JsonObject = {
+			method: options.method,
+			uri: options.url,
+			headers: options.headers,
+			json: true,
+			timeout: REQUEST_TIMEOUT_MS,
+			...(hasBody && options.body ? { body: options.body } : {}),
+		};
+		return (await context.helpers.request(legacyOptions)) as JsonObject;
+	}
+
+	throw new Error('HumanStep node: HTTP helpers are unavailable in this n8n version');
 }
 
 function extractResourceLocatorValue(param: unknown): string | undefined {
@@ -73,13 +143,12 @@ export function getAppBaseUrl(apiBaseUrl: string): string {
 }
 
 export async function humanStepApiRequest(
-	this: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
+	this: HumanStepRequestContext,
 	method: string,
 	resource: string,
 	body: JsonObject = {},
 	qs: JsonObject = {},
 	uri?: string,
-	option: JsonObject = {},
 ): Promise<JsonObject> {
 	const credentials = await this.getCredentials('humanStepApi');
 
@@ -89,29 +158,18 @@ export async function humanStepApiRequest(
 
 	const baseUrl = normalizeBaseUrl((credentials.baseUrl as string) || DEFAULT_BASE_URL);
 	const path = resource.startsWith('/') ? resource : `/${resource}`;
-
-	const options: JsonObject = {
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${credentials.apiKey as string}`,
-		},
-		method,
-		body,
-		qs,
-		uri: uri || `${baseUrl}${path}`,
-		json: true,
-	};
-
-	if (Object.keys(option).length !== 0) {
-		Object.assign(options, option);
-	}
-
-	if (Object.keys(body).length === 0) {
-		delete options.body;
-	}
+	const url = appendQueryParams(uri || `${baseUrl}${path}`, qs);
 
 	try {
-		return (await this.helpers.request!(options)) as JsonObject;
+		return await performHttpRequest(this, {
+			method,
+			url,
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${credentials.apiKey as string}`,
+			},
+			body: Object.keys(body).length > 0 ? body : undefined,
+		});
 	} catch (error) {
 		throw new Error(formatApiError(error));
 	}
@@ -131,7 +189,7 @@ export async function getDecision(
 export async function waitForDecision(
 	this: IExecuteFunctions,
 	decisionId: string,
-	options: { pollMs?: number; timeoutMs?: number } = {},
+	options: { pollMs?: number; timeoutMs?: number; resolveUrl?: string } = {},
 ): Promise<JsonObject> {
 	const pollMs = Math.max(500, options.pollMs ?? DEFAULT_WAIT_POLL_MS);
 	const timeoutMs = Math.max(1000, options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS);
@@ -143,7 +201,13 @@ export async function waitForDecision(
 			return decision;
 		}
 		if (Date.now() >= deadline) {
-			throw new Error(`Timeout waiting for decision ${decisionId} after ${timeoutMs}ms`);
+			const resolveHint = options.resolveUrl
+				? ` Resolve it at ${options.resolveUrl}.`
+				: '';
+			throw new NodeOperationError(
+				this.getNode(),
+				`Timeout waiting for decision ${decisionId} after ${timeoutMs}ms.${resolveHint}`,
+			);
 		}
 		await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
 	}
