@@ -11,6 +11,7 @@ import {
 const DEFAULT_BASE_URL = 'https://api.humanstep.ai/api';
 const DEFAULT_WAIT_POLL_MS = 2000;
 const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 60_000;
 
 function normalizeBaseUrl(baseUrl: string): string {
 	return baseUrl.replace(/\/+$/, '');
@@ -97,6 +98,61 @@ export function getAppBaseUrl(apiBaseUrl: string): string {
 	return normalized.replace(/\/api$/i, '');
 }
 
+function isExecuteContext(
+	context: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
+): context is IExecuteFunctions {
+	return typeof (context as IExecuteFunctions).getInputData === 'function';
+}
+
+async function performHttpRequest(
+	context: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
+	options: {
+		method: string;
+		url: string;
+		headers: Record<string, string>;
+		body?: JsonObject;
+	},
+): Promise<JsonObject> {
+	const hasBody = options.body !== undefined && Object.keys(options.body).length > 0;
+	const useHttpRequest = isExecuteContext(context) && !!context.helpers.httpRequest;
+
+	if (useHttpRequest) {
+		const httpOptions: IHttpRequestOptions = {
+			method: options.method as IHttpRequestOptions['method'],
+			url: options.url,
+			headers: options.headers,
+			timeout: REQUEST_TIMEOUT_MS,
+			...(hasBody ? { body: options.body } : {}),
+		};
+		return (await context.helpers.httpRequest!(httpOptions)) as JsonObject;
+	}
+
+	if (context.helpers.request) {
+		const legacyOptions: JsonObject = {
+			method: options.method,
+			uri: options.url,
+			headers: options.headers,
+			json: true,
+			timeout: REQUEST_TIMEOUT_MS,
+			...(hasBody && options.body ? { body: options.body } : {}),
+		};
+		return (await context.helpers.request(legacyOptions)) as JsonObject;
+	}
+
+	if (context.helpers.httpRequest) {
+		const httpOptions: IHttpRequestOptions = {
+			method: options.method as IHttpRequestOptions['method'],
+			url: options.url,
+			headers: options.headers,
+			timeout: REQUEST_TIMEOUT_MS,
+			...(hasBody ? { body: options.body } : {}),
+		};
+		return (await context.helpers.httpRequest(httpOptions)) as JsonObject;
+	}
+
+	throw new Error('HumanStep node: HTTP helpers are unavailable in this n8n version');
+}
+
 export async function humanStepApiRequest(
 	this: IExecuteFunctions | ILoadOptionsFunctions | IHookFunctions | IWebhookFunctions,
 	method: string,
@@ -114,45 +170,24 @@ export async function humanStepApiRequest(
 
 	const baseUrl = normalizeBaseUrl((credentials.baseUrl as string) || DEFAULT_BASE_URL);
 	const path = resource.startsWith('/') ? resource : `/${resource}`;
-	const targetUri = uri || `${baseUrl}${path}`;
+	let targetUrl = appendQueryParams(uri || `${baseUrl}${path}`, qs);
 
-	const options: JsonObject = {
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${credentials.apiKey as string}`,
-		},
-		method,
-		body,
-		qs,
-		uri: targetUri,
-		json: true,
+	if (Object.keys(option).length !== 0 && typeof option.uri === 'string') {
+		targetUrl = appendQueryParams(option.uri as string, qs);
+	}
+
+	const headers = {
+		'Content-Type': 'application/json',
+		Authorization: `Bearer ${credentials.apiKey as string}`,
 	};
 
-	if (Object.keys(option).length !== 0) {
-		Object.assign(options, option);
-	}
-
-	if (Object.keys(body).length === 0) {
-		delete options.body;
-	}
-
 	try {
-		// Prefer helpers.request — this is what worked in earlier n8n versions for this package.
-		if (this.helpers.request) {
-			return (await this.helpers.request(options)) as JsonObject;
-		}
-
-		if (this.helpers.httpRequest) {
-			const httpOptions: IHttpRequestOptions = {
-				method: method as IHttpRequestOptions['method'],
-				url: appendQueryParams(targetUri, qs),
-				headers: options.headers as Record<string, string>,
-				...(Object.keys(body).length > 0 ? { body } : {}),
-			};
-			return (await this.helpers.httpRequest(httpOptions)) as JsonObject;
-		}
-
-		throw new Error('HumanStep node: HTTP helpers are unavailable in this n8n version');
+		return await performHttpRequest(this, {
+			method,
+			url: targetUrl,
+			headers,
+			body: Object.keys(body).length > 0 ? body : undefined,
+		});
 	} catch (error) {
 		throw new Error(formatApiError(error));
 	}

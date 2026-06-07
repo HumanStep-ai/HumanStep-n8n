@@ -294,6 +294,23 @@ function buildVariantPayload(fieldsValue: Record<string, unknown>, schemaFields:
 	return payload;
 }
 
+function fieldsValueNeedsVariantSchema(fieldsValue: Record<string, unknown>): boolean {
+	return Object.keys(fieldsValue).some((key) => key.startsWith(VARIANT_FIELD_PREFIX));
+}
+
+function getMappedFieldValues(executeFunctions: IExecuteFunctions, itemIndex: number): Record<string, unknown> {
+	// Reading `fields` directly can hang in execute on some n8n versions because it
+	// re-triggers the resource mapper loader. Dot notation avoids that deadlock.
+	const directValue = executeFunctions.getNodeParameter('fields.value', itemIndex, {}) as Record<
+		string,
+		unknown
+	>;
+	if (directValue && typeof directValue === 'object' && !Array.isArray(directValue)) {
+		return directValue;
+	}
+	return {};
+}
+
 function parsePayloadJson(value: unknown): JsonObject {
 	if (value === undefined || value === null || value === '') {
 		return {};
@@ -327,34 +344,48 @@ async function buildDecisionRequestBody(
 				{ itemIndex },
 			);
 		}
-		const fieldsData = executeFunctions.getNodeParameter('fields', itemIndex, {}) as {
-			value?: Record<string, unknown>;
-		};
-		const additionalOptions = executeFunctions.getNodeParameter(
-			'additionalOptions',
+		const fieldsValue = getMappedFieldValues(executeFunctions, itemIndex);
+		const priority = executeFunctions.getNodeParameter(
+			'additionalOptions.priority',
 			itemIndex,
-			{},
-		) as Record<string, unknown>;
+			'',
+		) as string;
+		const externalId = executeFunctions.getNodeParameter(
+			'additionalOptions.externalId',
+			itemIndex,
+			'',
+		) as string;
+		const callbackUrl = executeFunctions.getNodeParameter(
+			'additionalOptions.callbackUrl',
+			itemIndex,
+			'',
+		) as string;
 		let payload: JsonObject = {};
 
-		if (fieldsData.value && typeof fieldsData.value === 'object') {
-			const response = await humanStepApiRequest.call(executeFunctions, 'GET', `/templates/${templateId}`);
-			const schemaFields = response.fields_schema || response.fieldsSchema || [];
-			if (Array.isArray(schemaFields)) {
-				payload = buildVariantPayload(fieldsData.value, schemaFields);
+		if (Object.keys(fieldsValue).length > 0) {
+			if (fieldsValueNeedsVariantSchema(fieldsValue)) {
+				const response = await humanStepApiRequest.call(
+					executeFunctions,
+					'GET',
+					`/templates/${templateId}`,
+				);
+				const schemaFields = response.fields_schema || response.fieldsSchema || [];
+				payload = Array.isArray(schemaFields)
+					? buildVariantPayload(fieldsValue, schemaFields)
+					: {};
 			} else {
-				for (const [key, value] of Object.entries(fieldsData.value)) {
+				for (const [key, value] of Object.entries(fieldsValue)) {
 					if (isNonEmptyValue(value)) {
 						payload[key] = value as JsonObject[string];
 					}
 				}
 			}
 		}
-		if (additionalOptions.priority) {
-			payload.priority = additionalOptions.priority as string;
+		if (priority) {
+			payload.priority = priority;
 		}
-		if (additionalOptions.externalId) {
-			payload.external_id = additionalOptions.externalId as string;
+		if (externalId) {
+			payload.external_id = externalId;
 		}
 
 		const requestBody: JsonObject = {
@@ -362,18 +393,19 @@ async function buildDecisionRequestBody(
 			payload,
 		};
 
-		if (additionalOptions.callbackUrl) {
-			requestBody.callback_url = additionalOptions.callbackUrl as string;
+		if (callbackUrl) {
+			requestBody.callback_url = callbackUrl;
 		}
 
 		return requestBody;
 	}
 
 	const questionTitle = executeFunctions.getNodeParameter('questionTitle', itemIndex) as string;
-	const options = executeFunctions.getNodeParameter('options', itemIndex, {}) as Record<string, unknown>;
+	const payloadJson = executeFunctions.getNodeParameter('options.payloadJson', itemIndex, '{}');
+	const callbackUrl = executeFunctions.getNodeParameter('options.callbackUrl', itemIndex, '') as string;
 	let payload: JsonObject = {};
 	try {
-		payload = parsePayloadJson(options.payloadJson);
+		payload = parsePayloadJson(payloadJson);
 	} catch {
 		throw new NodeOperationError(executeFunctions.getNode(), 'Payload JSON is invalid', {
 			itemIndex,
@@ -384,8 +416,8 @@ async function buildDecisionRequestBody(
 		payload,
 	};
 
-	if (options.callbackUrl) {
-		requestBody.callback_url = options.callbackUrl as string;
+	if (callbackUrl) {
+		requestBody.callback_url = callbackUrl;
 	}
 
 	return requestBody;
@@ -606,7 +638,7 @@ export class HumanStep implements INodeType {
 					},
 				},
 				typeOptions: {
-					loadOptionsDependsOn: ['templateId.value', 'variantInputMode', 'variantGroupsToShow'],
+					loadOptionsDependsOn: ['templateId.value'],
 					resourceMapper: {
 						resourceMapperMethod: 'getTemplateFieldsMapping',
 						mode: 'add',
@@ -840,12 +872,21 @@ export class HumanStep implements INodeType {
 									{ itemIndex: i },
 								);
 							}
-							const waitOptions = this.getNodeParameter('waitOptions', i, {}) as Record<string, number>;
+							const pollIntervalSeconds = this.getNodeParameter(
+								'waitOptions.pollIntervalSeconds',
+								i,
+								2,
+							) as number;
+							const timeoutMinutes = this.getNodeParameter(
+								'waitOptions.timeoutMinutes',
+								i,
+								5,
+							) as number;
 							const resolveUrl =
 								typeof responseData.resolve_url === 'string' ? responseData.resolve_url : undefined;
 							outputData = await waitForDecision.call(this, decisionId, {
-								pollMs: (waitOptions.pollIntervalSeconds ?? 2) * 1000,
-								timeoutMs: (waitOptions.timeoutMinutes ?? 5) * 60 * 1000,
+								pollMs: (pollIntervalSeconds ?? 2) * 1000,
+								timeoutMs: (timeoutMinutes ?? 5) * 60 * 1000,
 								resolveUrl,
 							});
 						}
