@@ -7,6 +7,7 @@ import {
 	JsonObject,
 	NodeOperationError,
 } from 'n8n-workflow';
+import { humanStepDebug } from './debug';
 
 const DEFAULT_BASE_URL = 'https://api.humanstep.ai/api';
 const DEFAULT_WAIT_POLL_MS = 2000;
@@ -108,6 +109,17 @@ async function performHttpRequest(
 	},
 ): Promise<JsonObject> {
 	const hasBody = options.body !== undefined && Object.keys(options.body).length > 0;
+	const helper =
+		typeof context.helpers.request === 'function'
+			? 'request'
+			: typeof context.helpers.httpRequest === 'function'
+				? 'httpRequest'
+				: 'none';
+	humanStepDebug('http', `→ ${options.method} ${options.url}`, {
+		helper,
+		hasBody,
+		bodyKeys: hasBody && options.body ? Object.keys(options.body) : [],
+	});
 
 	// Prefer helpers.request — this is what the trigger webhook path uses successfully.
 	if (context.helpers.request) {
@@ -119,7 +131,9 @@ async function performHttpRequest(
 			timeout: REQUEST_TIMEOUT_MS,
 			...(hasBody && options.body ? { body: options.body } : {}),
 		};
-		return (await context.helpers.request(legacyOptions)) as JsonObject;
+		const response = (await context.helpers.request(legacyOptions)) as JsonObject;
+		humanStepDebug('http', `← ${options.method} ${options.url} (request)`);
+		return response;
 	}
 
 	if (context.helpers.httpRequest) {
@@ -130,7 +144,9 @@ async function performHttpRequest(
 			timeout: REQUEST_TIMEOUT_MS,
 			...(hasBody ? { body: options.body } : {}),
 		};
-		return (await context.helpers.httpRequest(httpOptions)) as JsonObject;
+		const response = (await context.helpers.httpRequest(httpOptions)) as JsonObject;
+		humanStepDebug('http', `← ${options.method} ${options.url} (httpRequest)`);
+		return response;
 	}
 
 	throw new Error('HumanStep node: HTTP helpers are unavailable in this n8n version');
@@ -145,13 +161,21 @@ export async function humanStepApiRequest(
 	uri?: string,
 	option: JsonObject = {},
 ): Promise<JsonObject> {
+	humanStepDebug('api', `humanStepApiRequest ${method} ${resource}`, {
+		qsKeys: Object.keys(qs),
+		bodyKeys: Object.keys(body),
+		hasCustomUri: Boolean(uri),
+	});
+
 	const credentials = await this.getCredentials('humanStepApi');
 
 	if (credentials === undefined) {
+		humanStepDebug('api', 'getCredentials returned undefined');
 		throw new Error('No credentials returned');
 	}
 
 	const baseUrl = normalizeBaseUrl((credentials.baseUrl as string) || DEFAULT_BASE_URL);
+	humanStepDebug('api', 'credentials loaded', { baseUrl });
 	const path = resource.startsWith('/') ? resource : `/${resource}`;
 	let targetUrl = appendQueryParams(uri || `${baseUrl}${path}`, qs);
 
@@ -165,13 +189,18 @@ export async function humanStepApiRequest(
 	};
 
 	try {
-		return await performHttpRequest(this, {
+		const response = await performHttpRequest(this, {
 			method,
 			url: targetUrl,
 			headers,
 			body: Object.keys(body).length > 0 ? body : undefined,
 		});
+		humanStepDebug('api', `humanStepApiRequest ${method} ${resource} succeeded`);
+		return response;
 	} catch (error) {
+		humanStepDebug('api', `humanStepApiRequest ${method} ${resource} failed`, {
+			error: formatApiError(error),
+		});
 		throw new Error(formatApiError(error));
 	}
 }
@@ -196,9 +225,13 @@ export async function waitForDecision(
 	const timeoutMs = Math.max(1000, options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS);
 	const deadline = Date.now() + timeoutMs;
 
+	humanStepDebug('wait', `waiting for decision ${decisionId}`, { pollMs, timeoutMs });
+
 	while (true) {
 		const decision = await getDecision.call(this, decisionId);
+		humanStepDebug('wait', `polled decision ${decisionId}`, { status: decision.status });
 		if (decision.status !== 'pending') {
+			humanStepDebug('wait', `decision ${decisionId} resolved`, { status: decision.status });
 			return decision;
 		}
 		if (Date.now() >= deadline) {

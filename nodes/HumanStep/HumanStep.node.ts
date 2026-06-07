@@ -11,6 +11,7 @@ import {
 	JsonObject,
 	NodeOperationError,
 } from 'n8n-workflow';
+import { humanStepDebug } from './debug';
 import { extractTemplateId, humanStepApiRequest, listActiveTemplates, waitForDecision } from './GenericFunctions';
 
 const CREATE_DECISION_OPERATIONS = ['createDecision', 'createDecisionAndWait'];
@@ -355,8 +356,10 @@ async function buildDecisionRequestBody(
 	executeFunctions: IExecuteFunctions,
 	itemIndex: number,
 ): Promise<JsonObject> {
+	humanStepDebug('buildBody', `start item ${itemIndex}`);
 	const nodeParams = getStoredNodeParameters(executeFunctions);
 	const useTemplate = resolveNodeParameter(executeFunctions, itemIndex, 'useTemplate', nodeParams.useTemplate, false) === true;
+	humanStepDebug('buildBody', `useTemplate=${useTemplate}`, { itemIndex });
 
 	if (useTemplate) {
 		const templateId = extractTemplateId(
@@ -370,6 +373,11 @@ async function buildDecisionRequestBody(
 			);
 		}
 		const fieldsValue = getMappedFieldValues(nodeParams);
+		humanStepDebug('buildBody', 'template mode', {
+			templateId,
+			fieldCount: Object.keys(fieldsValue).length,
+			hasVariants: fieldsValueNeedsVariantSchema(fieldsValue),
+		});
 		const additionalOptions = (nodeParams.additionalOptions ?? {}) as Record<string, unknown>;
 		const priority = additionalOptions.priority as string | undefined;
 		const externalId = additionalOptions.externalId as string | undefined;
@@ -411,6 +419,10 @@ async function buildDecisionRequestBody(
 			requestBody.callback_url = callbackUrl;
 		}
 
+		humanStepDebug('buildBody', 'template request body ready', {
+			template_id: requestBody.template_id,
+			payloadKeys: Object.keys((requestBody.payload as JsonObject) ?? {}),
+		});
 		return requestBody;
 	}
 
@@ -437,6 +449,10 @@ async function buildDecisionRequestBody(
 		requestBody.callback_url = callbackUrl;
 	}
 
+	humanStepDebug('buildBody', 'simple request body ready', {
+		title: requestBody.title,
+		payloadKeys: Object.keys((requestBody.payload as JsonObject) ?? {}),
+	});
 	return requestBody;
 }
 
@@ -862,23 +878,36 @@ export class HumanStep implements INodeType {
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+		humanStepDebug('execute', 'start', {
+			nodeId: this.getNode().id,
+			workflowId: this.getWorkflow().id,
+		});
+
 		let items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 		const nodeParams = getStoredNodeParameters(this);
 		const resource = String(nodeParams.resource ?? 'validation');
 		const operation = String(nodeParams.operation ?? 'createDecision');
 
+		humanStepDebug('execute', 'parameters', { resource, operation, inputItems: items.length });
+
 		// Allow manual step execution without upstream input (common in the n8n editor).
 		if (items.length === 0) {
 			items = [{ json: {}, pairedItem: { item: 0 } }];
+			humanStepDebug('execute', 'no input items — using synthetic item for manual run');
 		}
 
 		for (let i = 0; i < items.length; i++) {
 			try {
 				if (resource === 'validation') {
 					if (CREATE_DECISION_OPERATIONS.includes(operation)) {
+						humanStepDebug('execute', `item ${i}: building request body`);
 						const requestBody = await buildDecisionRequestBody(this, i);
+						humanStepDebug('execute', `item ${i}: POST /decisions`);
 						const responseData = await humanStepApiRequest.call(this, 'POST', '/decisions', requestBody);
+						humanStepDebug('execute', `item ${i}: POST succeeded`, {
+							decisionId: getResponseDecisionId(responseData),
+						});
 						let outputData = responseData;
 
 						if (operation === 'createDecisionAndWait') {
@@ -906,9 +935,14 @@ export class HumanStep implements INodeType {
 							json: outputData,
 							pairedItem: { item: i },
 						});
+					} else {
+						humanStepDebug('execute', `item ${i}: skipped — unknown operation`, { operation });
 					}
+				} else {
+					humanStepDebug('execute', `item ${i}: skipped — unknown resource`, { resource });
 				}
 			} catch (error) {
+				humanStepDebug('execute', `item ${i}: error`, { message: (error as Error).message });
 				if (this.continueOnFail()) {
 					returnData.push({ json: { error: (error as Error).message } });
 					continue;
@@ -917,6 +951,7 @@ export class HumanStep implements INodeType {
 			}
 		}
 
+		humanStepDebug('execute', 'done', { outputItems: returnData.length });
 		return [returnData];
 	}
 }
