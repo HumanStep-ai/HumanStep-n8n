@@ -79,6 +79,15 @@ function getFieldSubFields(field: any): any[] {
 	return Array.isArray(subFields) ? subFields : [];
 }
 
+function getTemplateSchemaFields(response: JsonObject): any[] {
+	const schemaFields = response.fields_schema || response.fieldsSchema || [];
+	return Array.isArray(schemaFields) ? schemaFields : [];
+}
+
+function schemaHasVariantSelectors(schemaFields: any[]): boolean {
+	return schemaFields.some((field) => field?.type === 'variant_selector');
+}
+
 function getFieldOptions(field: any): Array<{ name: string; value: string }> | undefined {
 	const rawOptions = Array.isArray(field.options)
 		? field.options
@@ -536,6 +545,24 @@ export class HumanStep implements INodeType {
 				],
 			},
 			{
+				displayName: 'Template Has Variant Name or ID',
+				name: 'templateHasVariants',
+				type: 'options',
+				noDataExpression: true,
+				default: 'false',
+				description:
+					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
+				typeOptions: {
+					loadOptionsDependsOn: ['templateId.value'],
+					loadOptionsMethod: 'getTemplateHasVariantsFlag',
+				},
+				displayOptions: {
+					hide: {
+						templateHasVariants: ['true', 'false'],
+					},
+				},
+			},
+			{
 				displayName: 'Variant Input Mode',
 				name: 'variantInputMode',
 				type: 'options',
@@ -545,6 +572,7 @@ export class HumanStep implements INodeType {
 						resource: ['validation'],
 						operation: CREATE_DECISION_OPERATIONS,
 						useTemplate: [true],
+						templateHasVariants: ['true'],
 					},
 				},
 				options: [
@@ -571,6 +599,7 @@ export class HumanStep implements INodeType {
 						resource: ['validation'],
 						operation: CREATE_DECISION_OPERATIONS,
 						useTemplate: [true],
+						templateHasVariants: ['true'],
 						variantInputMode: ['expanded'],
 					},
 				},
@@ -597,7 +626,12 @@ export class HumanStep implements INodeType {
 					},
 				},
 				typeOptions: {
-					loadOptionsDependsOn: ['templateId.value', 'variantInputMode', 'variantGroupsToShow'],
+					loadOptionsDependsOn: [
+						'templateId.value',
+						'templateHasVariants',
+						'variantInputMode',
+						'variantGroupsToShow',
+					],
 					resourceMapper: {
 						resourceMapperMethod: 'getTemplateFieldsMapping',
 						mode: 'add',
@@ -702,6 +736,24 @@ export class HumanStep implements INodeType {
 			},
 		},
 		loadOptions: {
+			async getTemplateHasVariantsFlag(
+				this: ILoadOptionsFunctions,
+			): Promise<INodePropertyOptions[]> {
+				const templateId = extractTemplateId(this.getCurrentNodeParameter('templateId'));
+				if (!templateId) {
+					return [{ name: 'False', value: 'false' }];
+				}
+
+				try {
+					const response = await humanStepApiRequest.call(this, 'GET', `/templates/${templateId}`);
+					const hasVariants = schemaHasVariantSelectors(getTemplateSchemaFields(response));
+					return hasVariants
+						? [{ name: 'True', value: 'true' }]
+						: [{ name: 'False', value: 'false' }];
+				} catch {
+					return [{ name: 'False', value: 'false' }];
+				}
+			},
 			async getTemplateFields(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const templateIdParam = this.getCurrentNodeParameter('templateId') as any;
 				
@@ -771,9 +823,9 @@ export class HumanStep implements INodeType {
 
 				try {
 					const response = await humanStepApiRequest.call(this, 'GET', `/templates/${templateId}`);
-					const schemaFields = response.fields_schema || response.fieldsSchema || [];
+					const schemaFields = getTemplateSchemaFields(response);
 
-					if (!Array.isArray(schemaFields) || schemaFields.length === 0) {
+					if (schemaFields.length === 0) {
 						return { fields: [] };
 					}
 
