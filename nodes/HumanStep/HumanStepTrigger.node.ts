@@ -219,6 +219,9 @@ export class HumanStepTrigger implements INodeType {
 				if (templateId) {
 					body.template_id = templateId;
 				}
+				if (categoryId) {
+					body.category_id = categoryId;
+				}
 
 				const responseData = await humanStepApiRequest.call(
 					this,
