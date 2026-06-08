@@ -17,6 +17,7 @@ import { extractTemplateId, humanStepApiRequest, listActiveTemplates, waitForDec
 const CREATE_DECISION_OPERATIONS = ['createDecision', 'createDecisionAndWait'];
 const VARIANT_FIELD_PREFIX = '__humanstepVariant__';
 const DEFAULT_VARIANT_GROUPS_TO_SHOW = 2;
+const ARRAY_FIELD_TYPES = new Set(['multiselect', 'checkbox_group']);
 
 type VariantSelectionMode = 'single' | 'multiple';
 
@@ -154,6 +155,117 @@ function getVariantSelectionMode(field: any): VariantSelectionMode {
 	return field.selectionMode === 'multiple' || field.selection_mode === 'multiple' ? 'multiple' : 'single';
 }
 
+function isArrayFieldType(fieldType: string | undefined): boolean {
+	return ARRAY_FIELD_TYPES.has(fieldType ?? '');
+}
+
+function normalizeArrayFieldValue(value: unknown): string[] {
+	if (value === undefined || value === null || value === '') {
+		return [];
+	}
+
+	if (Array.isArray(value)) {
+		return value
+			.filter((item) => item !== undefined && item !== null && item !== '')
+			.map((item) => String(item));
+	}
+
+	if (typeof value === 'string') {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return [];
+		}
+
+		if (trimmed.startsWith('[')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (Array.isArray(parsed)) {
+					return parsed
+						.filter((item) => item !== undefined && item !== null && item !== '')
+						.map((item) => String(item));
+				}
+			} catch {
+				// Fall through to comma-separated parsing.
+			}
+		}
+
+		if (trimmed.includes(',')) {
+			return trimmed
+				.split(',')
+				.map((part) => part.trim())
+				.filter(Boolean);
+		}
+
+		return [trimmed];
+	}
+
+	return [String(value)];
+}
+
+function normalizeFieldValue(field: any, value: unknown): unknown {
+	if (!isArrayFieldType(field?.type)) {
+		return value;
+	}
+
+	const normalized = normalizeArrayFieldValue(value);
+	return normalized.length > 0 ? normalized : value;
+}
+
+function buildArrayFieldDescription(field: any): string {
+	const parts: string[] = [];
+	const baseDescription = field.description || field.helpText;
+	if (baseDescription) {
+		parts.push(baseDescription);
+	}
+
+	const options = getFieldOptions(field);
+	if (options?.length) {
+		const optionValues = options.map((opt) => opt.value).join(', ');
+		parts.push(`Allowed values: ${optionValues}.`);
+	}
+
+	parts.push(
+		'Enter selected option values as a JSON array (e.g. ["value_a", "value_b"]) or comma-separated (value_a, value_b). Use option values, not display labels.',
+	);
+
+	return parts.join(' ');
+}
+
+function buildFieldSchemaMap(schemaFields: any[]): Map<string, any> {
+	const schemaByKey = new Map<string, any>();
+	for (const field of schemaFields) {
+		const key = getFieldKey(field);
+		if (key) {
+			schemaByKey.set(key, field);
+		}
+	}
+	return schemaByKey;
+}
+
+function normalizeFieldsValue(
+	fieldsValue: Record<string, unknown>,
+	schemaFields: any[],
+): Record<string, unknown> {
+	const schemaByKey = buildFieldSchemaMap(schemaFields);
+	const normalized: Record<string, unknown> = {};
+
+	for (const [key, value] of Object.entries(fieldsValue)) {
+		if (key.startsWith(VARIANT_FIELD_PREFIX)) {
+			normalized[key] = value;
+			continue;
+		}
+
+		const field = schemaByKey.get(key);
+		normalized[key] = field ? normalizeFieldValue(field, value) : value;
+	}
+
+	return normalized;
+}
+
+function getSubFieldSchema(parentField: any, subFieldKey: string): any | undefined {
+	return getFieldSubFields(parentField).find((subField) => getFieldKey(subField) === subFieldKey);
+}
+
 function buildVariantSelectorDescription(field: any): string | undefined {
 	if (field.type !== 'variant_selector') {
 		return field.description || field.helpText || undefined;
@@ -186,11 +298,13 @@ function buildVariantSelectorDescription(field: any): string | undefined {
 
 function createMapperField(field: any, id?: string, displayName?: string, description?: string) {
 	const fieldType = field.type || 'text';
+	const resolvedDescription = description
+		?? (isArrayFieldType(fieldType) ? buildArrayFieldDescription(field) : buildVariantSelectorDescription(field));
 
 	return {
 		id: id ?? getFieldKey(field),
 		displayName: displayName ?? `${getFieldLabel(field)} (${fieldType})`,
-		description: description ?? buildVariantSelectorDescription(field),
+		description: resolvedDescription,
 		required: field.required || false,
 		defaultMatch: false,
 		canBeUsedToMatch: false,
@@ -219,13 +333,16 @@ function expandVariantSelectorFields(field: any, requestedCount: number) {
 				continue;
 			}
 
+			const variantDescription = isArrayFieldType(subField.type)
+				? buildArrayFieldDescription(subField)
+				: subField.description || subField.helpText;
 			fields.push(createMapperField(
 				subField,
 				encodeVariantFieldId(parentKey, variantIndex, subFieldKey),
 				`[${variantLabel}] ${getFieldLabel(subField)}`,
 				[
 					`${parentLabel} / Variation ${variantLabel} / ${getFieldLabel(subField)}`,
-					subField.description || subField.helpText,
+					variantDescription,
 				].filter(Boolean).join(' '),
 			));
 		}
@@ -273,7 +390,13 @@ function buildVariantPayload(fieldsValue: Record<string, unknown>, schemaFields:
 			variants.set(variantReference.variantIndex, variant);
 		}
 
-		variant[variantReference.subFieldKey] = value;
+		const parentField = variantFields.get(variantReference.parentKey);
+		const subField = parentField
+			? getSubFieldSchema(parentField, variantReference.subFieldKey)
+			: undefined;
+		variant[variantReference.subFieldKey] = subField
+			? normalizeFieldValue(subField, value)
+			: value;
 	}
 
 	for (const [parentKey, variantsByIndex] of variantValues.entries()) {
@@ -321,6 +444,7 @@ async function buildDecisionRequestBody(
 	executeFunctions: IExecuteFunctions,
 	itemIndex: number,
 ): Promise<JsonObject> {
+	const decisionTitle = executeFunctions.getNodeParameter('decisionTitle', itemIndex) as string;
 	const useTemplate = executeFunctions.getNodeParameter('useTemplate', itemIndex) as boolean;
 	humanStepDebug('buildBody', `useTemplate=${useTemplate}`, { itemIndex });
 
@@ -354,18 +478,19 @@ async function buildDecisionRequestBody(
 		let payload: JsonObject = {};
 
 		if (Object.keys(fieldsValue).length > 0) {
-			if (fieldsValueNeedsVariantSchema(fieldsValue)) {
-				const response = await humanStepApiRequest.call(
-					executeFunctions,
-					'GET',
-					`/templates/${templateId}`,
-				);
-				const schemaFields = response.fields_schema || response.fieldsSchema || [];
-				payload = Array.isArray(schemaFields)
-					? buildVariantPayload(fieldsValue, schemaFields)
-					: {};
+			const response = await humanStepApiRequest.call(
+				executeFunctions,
+				'GET',
+				`/templates/${templateId}`,
+			);
+			const schemaFields = response.fields_schema || response.fieldsSchema || [];
+			const schemaArray = Array.isArray(schemaFields) ? schemaFields : [];
+			const normalizedFields = normalizeFieldsValue(fieldsValue, schemaArray);
+
+			if (fieldsValueNeedsVariantSchema(normalizedFields)) {
+				payload = buildVariantPayload(normalizedFields, schemaArray);
 			} else {
-				for (const [key, value] of Object.entries(fieldsValue)) {
+				for (const [key, value] of Object.entries(normalizedFields)) {
 					if (isNonEmptyValue(value)) {
 						payload[key] = value as JsonObject[string];
 					}
@@ -381,6 +506,7 @@ async function buildDecisionRequestBody(
 
 		const requestBody: JsonObject = {
 			template_id: templateId,
+			title: decisionTitle,
 			payload,
 		};
 
@@ -390,12 +516,11 @@ async function buildDecisionRequestBody(
 
 		humanStepDebug('buildBody', 'template request body ready', {
 			template_id: requestBody.template_id,
+			title: requestBody.title,
 			payloadKeys: Object.keys((requestBody.payload as JsonObject) ?? {}),
 		});
 		return requestBody;
 	}
-
-	const questionTitle = executeFunctions.getNodeParameter('questionTitle', itemIndex) as string;
 	const options = executeFunctions.getNodeParameter('options', itemIndex, {}) as {
 		payloadJson?: unknown;
 		callbackUrl?: string;
@@ -409,7 +534,7 @@ async function buildDecisionRequestBody(
 		});
 	}
 	const requestBody: JsonObject = {
-		title: questionTitle,
+		title: decisionTitle,
 		payload,
 	};
 
@@ -485,6 +610,21 @@ export class HumanStep implements INodeType {
 				default: 'createDecision',
 			},
 			{
+				displayName: 'Decision Title',
+				name: 'decisionTitle',
+				type: 'string',
+				required: true,
+				displayOptions: {
+					show: {
+						resource: ['validation'],
+						operation: CREATE_DECISION_OPERATIONS,
+					},
+				},
+				default: '',
+				placeholder: 'e.g. Approve this expense request',
+				description: 'Title shown in HumanStep for this decision',
+			},
+			{
 				displayName: 'Use Template',
 				name: 'useTemplate',
 				type: 'boolean',
@@ -496,22 +636,6 @@ export class HumanStep implements INodeType {
 					},
 				},
 				description: 'Whether to use a predefined template for this validation',
-			},
-			{
-				displayName: 'Question Title',
-				name: 'questionTitle',
-				type: 'string',
-				required: true,
-				displayOptions: {
-					show: {
-						resource: ['validation'],
-						operation: CREATE_DECISION_OPERATIONS,
-						useTemplate: [false],
-					},
-				},
-				default: '',
-				placeholder: 'e.g. Approve this request?',
-				description: 'The question shown in HumanStep for this validation (boolean response)',
 			},
 			{
 				displayName: 'Options',
